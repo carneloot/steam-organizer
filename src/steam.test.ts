@@ -3,12 +3,162 @@ import { ConfigProvider, Deferred, Effect, Fiber } from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
 import { TestClock } from 'effect/testing';
 
-import { fetchLibrary } from './steam.js';
+import { fetchGameDescription, fetchLibrary } from './steam.js';
 
 const config = ConfigProvider.layer(
 	ConfigProvider.fromUnknown({ STEAM_API_KEY: 'test-secret-never-log' }),
 );
 const steamId = '76561198000000000';
+
+describe('Steam descriptions', () => {
+	it.effect.each([
+		{
+			body: {
+				620: {
+					success: true,
+					data: {
+						detailed_description: ' Full description ',
+						short_description: 'Short summary',
+					},
+				},
+			},
+			expected: 'Full description',
+		},
+		{
+			body: {
+				620: {
+					success: true,
+					data: {
+						detailed_description: '  ',
+						short_description: ' Short summary ',
+					},
+				},
+			},
+			expected: 'Short summary',
+		},
+		{
+			body: {
+				620: { success: true, data: { short_description: 'Short only' } },
+			},
+			expected: 'Short only',
+		},
+		{ body: { 620: { success: false } }, expected: null },
+		{ body: { 620: { success: true } }, expected: null },
+		{
+			body: { 620: { success: true, data: { short_description: ' ' } } },
+			expected: null,
+		},
+		{
+			body: {
+				621: { success: true, data: { detailed_description: 'Wrong game' } },
+			},
+			expected: null,
+		},
+		{
+			body: { 620: { success: true, data: { detailed_description: 123 } } },
+			expected: null,
+		},
+	])(
+		'decodes descriptions or returns no description for $body',
+		({ body, expected }) =>
+			Effect.gen(function* () {
+				const client = HttpClient.make((request, url) =>
+					Effect.sync(() => {
+						assert.strictEqual(url.origin, 'https://store.steampowered.com');
+						assert.strictEqual(url.pathname, '/api/appdetails');
+						assert.strictEqual(url.searchParams.get('appids'), '620');
+						assert.strictEqual(url.searchParams.get('l'), 'english');
+						assert.strictEqual(url.searchParams.has('key'), false);
+						assert.strictEqual(request.headers.authorization, undefined);
+						return HttpClientResponse.fromWeb(request, Response.json(body));
+					}),
+				);
+				assert.strictEqual(
+					yield* fetchGameDescription(620).pipe(
+						Effect.provideService(HttpClient.HttpClient, client),
+					),
+					expected,
+				);
+			}).pipe(
+				Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+			),
+	);
+
+	it.effect.each([429, 503])('returns no description on HTTP %s', (status) =>
+		Effect.gen(function* () {
+			const client = HttpClient.make((request) =>
+				Effect.succeed(
+					HttpClientResponse.fromWeb(request, Response.json({}, { status })),
+				),
+			);
+			assert.strictEqual(
+				yield* fetchGameDescription(620).pipe(
+					Effect.provideService(HttpClient.HttpClient, client),
+				),
+				null,
+			);
+		}),
+	);
+
+	it.effect(
+		'returns no description on transport failures and invalid JSON',
+		() =>
+			Effect.gen(function* () {
+				const failed = HttpClient.make((request) =>
+					Effect.fail(
+						new HttpClientError.HttpClientError({
+							reason: new HttpClientError.TransportError({
+								request,
+								cause: 'offline',
+							}),
+						}),
+					),
+				);
+				assert.strictEqual(
+					yield* fetchGameDescription(620).pipe(
+						Effect.provideService(HttpClient.HttpClient, failed),
+					),
+					null,
+				);
+				const invalid = HttpClient.make((request) =>
+					Effect.succeed(
+						HttpClientResponse.fromWeb(request, new Response('not JSON')),
+					),
+				);
+				assert.strictEqual(
+					yield* fetchGameDescription(620).pipe(
+						Effect.provideService(HttpClient.HttpClient, invalid),
+					),
+					null,
+				);
+			}),
+	);
+
+	it.effect.each([false, true])(
+		'returns no description after a five-second stall, body: %s',
+		(body) =>
+			Effect.gen(function* () {
+				const started = yield* Deferred.make<void>();
+				const client = HttpClient.make((request) =>
+					Effect.gen(function* () {
+						yield* Deferred.succeed(started, undefined);
+						if (!body) return yield* Effect.never;
+						return HttpClientResponse.fromWeb(
+							request,
+							new Response(new ReadableStream()),
+						);
+					}),
+				);
+				const fiber = yield* fetchGameDescription(620).pipe(
+					Effect.provideService(HttpClient.HttpClient, client),
+					Effect.forkScoped,
+				);
+				yield* Deferred.await(started);
+				yield* TestClock.adjust('5 seconds');
+				assert.strictEqual(yield* Fiber.join(fiber), null);
+			}),
+	);
+});
 
 describe('Steam adapter', () => {
 	it.effect('sends the documented parameters and decodes the response', () =>

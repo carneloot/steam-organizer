@@ -66,8 +66,14 @@ describe('CLI integration', () => {
 				`
 				globalThis.fetch = async (input, init) => {
 					const request = new Request(input, init);
+					const url = new URL(request.url);
+					if (url.origin === 'https://store.steampowered.com') {
+						const appid = url.searchParams.get('appids');
+						return Response.json({ [appid]: { success: true, data: { detailed_description: 'Store description for ' + appid } } });
+					}
 					if (request.url !== 'https://api.typesafe.ai/v1/systemone') throw new Error('Unexpected endpoint');
 					const payload = await request.json();
+					if (payload.state.description !== 'Store description for ' + payload.state.appid) throw new Error('Missing store description');
 					if (String(payload.state.appid) === process.env.MOCK_FAIL || process.env.MOCK_FAIL === 'all') return Response.json({}, { status: 401 });
 					return Response.json({ answers: Object.fromEntries(Object.keys(payload.questions).map(tag => [tag, { type: 'noul', noul: ['Puzzle', 'Co-op'].includes(tag) ? 0.95 : 0.1 }])) });
 				};

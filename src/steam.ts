@@ -1,7 +1,44 @@
-import { Config, Effect, Redacted } from 'effect';
+import { Config, Effect, Redacted, Schema } from 'effect';
 import { HttpClient, HttpClientResponse } from 'effect/http';
 
 import { AppError, gamesFromResponse, OwnedGamesResponse } from './library.js';
+
+const AppDetailsResponse = Schema.Record(
+	Schema.String,
+	Schema.Struct({
+		success: Schema.Boolean,
+		data: Schema.optionalKey(
+			Schema.Struct({
+				detailed_description: Schema.optionalKey(Schema.String),
+				short_description: Schema.optionalKey(Schema.String),
+			}),
+		),
+	}),
+);
+
+export const fetchGameDescription = Effect.fn('Steam.fetchGameDescription')(
+	function* (appid: number) {
+		const client = yield* HttpClient.HttpClient;
+		const response = yield* client.get(
+			'https://store.steampowered.com/api/appdetails',
+			{
+				urlParams: { appids: String(appid), l: 'english' },
+			},
+		);
+		if (response.status < 200 || response.status >= 300) return null;
+		const payload =
+			yield* HttpClientResponse.schemaBodyJson(AppDetailsResponse)(response);
+		const details = payload[String(appid)];
+		if (!details?.success) return null;
+		return (
+			details.data?.detailed_description?.trim() ||
+			details.data?.short_description?.trim() ||
+			null
+		);
+	},
+	Effect.timeout('5 seconds'),
+	Effect.catch(() => Effect.succeed(null)),
+);
 
 export const fetchLibrary = Effect.fn('Steam.fetchLibrary')(
 	function* (steamId: string) {

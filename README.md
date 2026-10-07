@@ -43,13 +43,15 @@ The CLI calls `jev-latest` once per game, with all category questions in that re
 
 `Action`, `Adventure`, `RPG`, `Strategy`, `Simulation`, `Puzzle`, `Platformer`, `Racing`, `Sports`, `Horror`, `Roguelike`, and `Co-op`.
 
-Jev uses its knowledge of each game's name and Steam app ID. The CLI does not fetch store descriptions, so unknown games may receive no tags. These are model predictions, not verified Steam metadata. It never guesses personal labels such as `Completed`, `Dropped`, or `Favorites`.
+Before classification, the CLI tries to fetch the game's English description from Steam's public store endpoint. It prefers the detailed description and falls back to the short description. This lookup does not need a Steam API key and has a five-second deadline. If the description is missing, Steam is unavailable, or the lookup times out, Jev uses the game name and app ID alone. Descriptions are used for classification but are not saved to the library.
+
+Jev uses the description and its knowledge of the game to predict tags. These are model predictions, not verified Steam metadata. It never guesses personal labels such as `Completed`, `Dropped`, or `Favorites`.
 
 Each successful classification saves immediately and marks the game reviewed, even if no tags meet the threshold. Existing tags are preserved. Run `classify` again to resume after an interruption or failure, or use `classify --all` to include previously reviewed games. Reclassification adds tags but does not remove existing ones. Use `untag` to remove a wrong prediction.
 
 Use `--search` and `--category` to limit classification, for example `classify --category Unplayed`. Games reviewed manually in older versions are skipped unless you use `--all`.
 
-Classification sends game names and app IDs to TypeSafe and may incur API charges. Steam IDs, playtime, and existing tags are not sent. The API key is not saved. Each request has a 30-second deadline, including response decoding. Failed requests are not retried automatically to avoid duplicate charges; run the command again to resume.
+Classification sends game names, app IDs, and available store descriptions to TypeSafe and may incur API charges. Steam IDs, playtime, and existing tags are not sent. The API key is not saved. Each game's classification has a 30-second deadline, including the description lookup and response decoding. Failed Jev requests are not retried automatically to avoid duplicate charges; run the command again to resume.
 
 ## Sync your Steam library
 
