@@ -4,10 +4,14 @@ import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
 import { TestClock } from 'effect/testing';
 
 import { Steam } from '../services/steam.js';
+import { AppConfigLayer } from './app-config.js';
 import { LibraryLayer } from './library.js';
 import { SteamLayer } from './steam.js';
 
-const layer = SteamLayer.pipe(Layer.provide(LibraryLayer));
+const layer = SteamLayer.pipe(
+	Layer.provide(LibraryLayer),
+	Layer.provide(AppConfigLayer),
+);
 const fetchGameDescription = (appid: number) =>
 	Effect.flatMap(Steam, (steam) => steam.fetchGameDescription(appid)).pipe(
 		Effect.provide(layer),

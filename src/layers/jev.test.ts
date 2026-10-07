@@ -1,5 +1,14 @@
 import { assert, describe, it } from '@effect/vitest';
-import { ConfigProvider, Deferred, Effect, Fiber, Predicate, Schema } from 'effect';
+import {
+	ConfigProvider,
+	Deferred,
+	Effect,
+	Fiber,
+	Layer,
+	Predicate,
+	Redacted,
+	Schema,
+} from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
 import { TestClock } from 'effect/testing';
 
@@ -7,13 +16,15 @@ import {
 	CategoryCriteria,
 	type ClassificationGame,
 } from '../domain/classification.js';
+import { AppConfig } from '../services/app-config.js';
 import { Classifier } from '../services/classifier.js';
+import { AppConfigLayer } from './app-config.js';
 import { JevLayer } from './jev.js';
 
 const classifyGame = (game: ClassificationGame, criteria?: CategoryCriteria) =>
 	Effect.flatMap(Classifier, (classifier) =>
 		classifier.classifyGame(game, criteria),
-	).pipe(Effect.provide(JevLayer));
+	).pipe(Effect.provide(JevLayer), Effect.provide(AppConfigLayer));
 
 const config = ConfigProvider.layer(
 	ConfigProvider.fromUnknown({ TYPESAFE_API_KEY: 'jev-test-secret' }),
@@ -263,5 +274,39 @@ describe('Jev adapter', () => {
 				yield* TestClock.adjust('30 seconds');
 				assert.include((yield* Fiber.join(fiber)).message, 'timed out');
 			}).pipe(Effect.provide(config)),
+	);
+
+	it.effect('uses the injected app config instead of environment config', () =>
+		Effect.gen(function* () {
+			const client = HttpClient.make((request) =>
+				Effect.sync(() => {
+					assert.strictEqual(
+						request.headers.authorization,
+						'Bearer injected-key',
+					);
+					return HttpClientResponse.fromWeb(
+						request,
+						Response.json({ answers }),
+					);
+				}),
+			);
+			const tags = yield* Effect.flatMap(Classifier, (classifier) =>
+				classifier.classifyGame(game),
+			).pipe(
+				Effect.provide(JevLayer),
+				Effect.provide(
+					Layer.succeed(
+						AppConfig,
+						AppConfig.of({
+							jevApiKey: Redacted.make('injected-key'),
+							steamApiKey: null,
+						}),
+					),
+				),
+				Effect.provideService(HttpClient.HttpClient, client),
+				Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+			);
+			assert.deepStrictEqual(tags, ['Puzzle', 'Co-op']);
+		}),
 	);
 });

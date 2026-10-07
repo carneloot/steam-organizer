@@ -19,6 +19,7 @@ import {
 	SteamId,
 	terminalText,
 } from './domain/library.js';
+import { AppConfigLayer } from './layers/app-config.js';
 import { CollectionsLayer } from './layers/collections.js';
 import { JevLayer } from './layers/jev.js';
 import { FileLibraryStoreLayer } from './layers/library-store.js';
@@ -352,7 +353,21 @@ const appLayer = Layer.mergeAll(
 	FileLibraryStoreLayer,
 	steamLayer,
 	JevLayer,
-).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(NodeServices.layer));
+).pipe(
+	Layer.provide(AppConfigLayer),
+	Layer.provide(FetchHttpClient.layer),
+	Layer.provide(NodeServices.layer),
+);
+
+const reportError = (error: { readonly message: string }) =>
+	Console.error(error.message).pipe(
+		Effect.andThen(
+			Effect.sync(() => {
+				process.exitCode = 1;
+			}),
+		),
+	);
+
 root.pipe(
 	Command.withSubcommands([
 		sync,
@@ -366,16 +381,11 @@ root.pipe(
 		exportCommand,
 	]),
 	Command.run({ version: '0.1.0' }),
-	Effect.catchTag('AppError', (error) =>
-		Console.error(error.message).pipe(
-			Effect.andThen(
-				Effect.sync(() => {
-					process.exitCode = 1;
-				}),
-			),
-		),
-	),
 	Effect.provide(appLayer),
+	Effect.catchTags({
+		AppError: reportError,
+		ConfigurationError: reportError,
+	}),
 	Effect.provide(NodeServices.layer),
 	NodeRuntime.runMain,
 );

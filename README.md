@@ -195,12 +195,14 @@ src/
 │   ├── classification.ts      # Classifier input and category criteria
 │   └── library.ts             # Schemas and pure library transformations
 ├── services/
+│   ├── app-config.ts          # AppConfig values and configuration errors
 │   ├── classifier.ts          # Classifier contract
 │   ├── collections.ts         # Collections contract
 │   ├── library.ts             # LibraryService contract
 │   ├── library-store.ts       # LibraryStore persistence contract
 │   └── steam.ts               # Steam contract
 └── layers/
+    ├── app-config.ts          # AppConfigLayer reads runtime configuration
     ├── collections.ts         # CollectionsLayer
     ├── jev.ts                 # JevLayer implements Classifier
     ├── library.ts             # LibraryLayer
@@ -211,11 +213,12 @@ src/
 
 List the source files with `rg --files src`. Service methods expose their result and error types without implementation dependencies. Layers acquire dependencies once and supply those methods. Pure functions, such as category derivation and library merging, stay in `domain/`.
 
-`JevLayer` requires only an HTTP client. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
+`JevLayer` requires an HTTP client and `AppConfig`, not `Steam`. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
 
 ```ts
 import { Effect } from 'effect';
 import { FetchHttpClient } from 'effect/http';
+import { AppConfigLayer } from './src/layers/app-config.js';
 import { JevLayer } from './src/layers/jev.js';
 import { Classifier } from './src/services/classifier.js';
 
@@ -226,10 +229,14 @@ const classify = Effect.gen(function* () {
 		name: 'Portal 2',
 		description: 'Cooperative spatial puzzles in a dedicated campaign.',
 	});
-}).pipe(Effect.provide(JevLayer), Effect.provide(FetchHttpClient.layer));
+}).pipe(
+	Effect.provide(JevLayer),
+	Effect.provide(AppConfigLayer),
+	Effect.provide(FetchHttpClient.layer),
+);
 ```
 
-The Jev and Steam implementations read their API keys when the corresponding method runs, so offline commands do not require credentials. Tests provide layers with fake HTTP clients and configuration providers.
+`AppConfigLayer` reads both API keys once at layer construction and rejects whitespace-only values. `AppConfig` exposes plain redacted values, with `null` for unset keys. Jev and Steam select their credential-dependent implementation at layer construction, without checking configuration on each call. Missing keys disable classification or library sync respectively; offline commands and public Steam description lookup remain available. Tests can inject an `AppConfig` with `Layer.succeed` without reading environment variables.
 
 ## Check changes
 
