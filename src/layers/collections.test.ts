@@ -72,7 +72,7 @@ describe('Steam collection extraction', () => {
 					'constructor',
 				]);
 				assert.deepStrictEqual(
-					yield* Schema.decodeUnknownEffect(CategoryCriteria)(criteria),
+					yield* Schema.decodeEffect(CategoryCriteria)(criteria),
 					criteria,
 				);
 			}),

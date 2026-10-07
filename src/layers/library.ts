@@ -16,7 +16,7 @@ import {
 export const LibraryLayer = Layer.sync(LibraryService, () =>
 	LibraryService.of({
 		decodeImport: Effect.fn('Library.decodeImport')(function* (input) {
-			const parsed = yield* Schema.decodeUnknownEffect(
+			const parsed = yield* Schema.decodeEffect(
 				Schema.Union([SteamGames, OwnedGamesResponse]).pipe(
 					Schema.fromJsonString,
 				),

@@ -17,6 +17,7 @@
 		}
 	],
 	"rules": {
+		"effecttsgo/unstable-api-usage": "off",
 		"@typescript-eslint/ban-ts-comment": "error",
 		"@typescript-eslint/no-explicit-any": "error",
 		"anti-slop-effect/no-manual-effect-error-tag": "error",

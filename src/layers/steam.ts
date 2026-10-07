@@ -52,7 +52,7 @@ export const SteamLayer = Layer.effect(
 				);
 			},
 			Effect.timeout('5 seconds'),
-			Effect.catch(() => Effect.succeed(null)),
+			Effect.orElseSucceed(() => null),
 		);
 
 		const key = config.steamApiKey;
@@ -109,15 +109,16 @@ export const SteamLayer = Layer.effect(
 							);
 							return yield* library.gamesFromResponse(payload);
 						},
-						Effect.timeout('30 seconds'),
-						Effect.catchTag('TimeoutError', () =>
-							Effect.fail(
-								new SteamTimeoutError({
-									message:
-										'Steam request timed out. Nothing was saved. Try again.',
-								}),
-							),
-						),
+						Effect.timeoutOrElse({
+							duration: '30 seconds',
+							orElse: () =>
+								Effect.fail(
+									new SteamTimeoutError({
+										message:
+											'Steam request timed out. Nothing was saved. Try again.',
+									}),
+								),
+						}),
 					);
 		return Steam.of({ fetchGameDescription, fetchLibrary });
 	}),

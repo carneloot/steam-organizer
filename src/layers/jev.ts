@@ -14,7 +14,7 @@ import {
 	ClassificationTimeoutError,
 } from '../services/classifier.js';
 
-const probability = Schema.Number.check(
+const probability = Schema.Finite.check(
 	Schema.isBetween({ minimum: 0, maximum: 1 }),
 );
 const NoulAnswer = Schema.Struct({
@@ -120,15 +120,16 @@ export const JevLayer = Layer.effect(
 							}
 							return tags;
 						},
-						Effect.timeout('30 seconds'),
-						Effect.catchTag('TimeoutError', () =>
-							Effect.fail(
-								new ClassificationTimeoutError({
-									message:
-										'Jev request timed out. This game was not saved. Run again to resume.',
-								}),
-							),
-						),
+						Effect.timeoutOrElse({
+							duration: '30 seconds',
+							orElse: () =>
+								Effect.fail(
+									new ClassificationTimeoutError({
+										message:
+											'Jev request timed out. This game was not saved. Run again to resume.',
+									}),
+								),
+						}),
 					);
 		return Classifier.of({ classifyGame });
 	}),

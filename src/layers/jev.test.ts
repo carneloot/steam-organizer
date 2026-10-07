@@ -24,7 +24,7 @@ import { JevLayer } from './jev.js';
 const classifyGame = (game: ClassificationGame, criteria?: CategoryCriteria) =>
 	Effect.flatMap(Classifier, (classifier) =>
 		classifier.classifyGame(game, criteria),
-	).pipe(Effect.provide(JevLayer), Effect.provide(AppConfigLayer));
+	).pipe(Effect.provide(JevLayer.pipe(Layer.provide(AppConfigLayer))));
 
 const config = ConfigProvider.layer(
 	ConfigProvider.fromUnknown({ TYPESAFE_API_KEY: 'jev-test-secret' }),
@@ -57,7 +57,7 @@ describe('Jev adapter', () => {
 		'uses only supplied category criteria, missing answer: %s',
 		(missing) =>
 			Effect.gen(function* () {
-				const criteria = yield* Schema.decodeUnknownEffect(CategoryCriteria)({
+				const criteria = yield* Schema.decodeEffect(CategoryCriteria)({
 					'Cozy farming': 'Includes farming and low-pressure play.',
 					Competitive: 'Players compete against each other.',
 				});
@@ -303,18 +303,23 @@ describe('Jev adapter', () => {
 			const tags = yield* Effect.flatMap(Classifier, (classifier) =>
 				classifier.classifyGame(game),
 			).pipe(
-				Effect.provide(JevLayer),
 				Effect.provide(
-					Layer.succeed(
-						AppConfig,
-						AppConfig.of({
-							jevApiKey: Redacted.make('injected-key'),
-							steamApiKey: null,
-						}),
+					JevLayer.pipe(
+						Layer.provide(
+							Layer.succeed(
+								AppConfig,
+								AppConfig.of({
+									jevApiKey: Redacted.make('injected-key'),
+									steamApiKey: null,
+								}),
+							),
+						),
+						Layer.provideMerge(
+							ConfigProvider.layer(ConfigProvider.fromUnknown({})),
+						),
 					),
 				),
 				Effect.provideService(HttpClient.HttpClient, client),
-				Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
 			);
 			assert.deepStrictEqual(tags, ['Puzzle', 'Co-op']);
 		}),

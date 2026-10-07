@@ -28,9 +28,9 @@ export const FileLibraryStoreLayer = Layer.effect(
 				),
 			);
 			if (text === null) return emptyLibrary();
-			return yield* Schema.decodeUnknownEffect(
-				Library.pipe(Schema.fromJsonString),
-			)(text).pipe(
+			return yield* Schema.decodeEffect(Library.pipe(Schema.fromJsonString))(
+				text,
+			).pipe(
 				Effect.mapError(
 					() =>
 						new InvalidLibraryError({
@@ -70,7 +70,7 @@ export const FileLibraryStoreLayer = Layer.effect(
 					fs.remove(`${target}.lock`, { recursive: true }).pipe(Effect.orDie),
 			);
 			const next = yield* update(yield* load(target));
-			const valid = yield* Schema.decodeUnknownEffect(Library)(next).pipe(
+			const valid = yield* Schema.decodeEffect(Library)(next).pipe(
 				Effect.mapError(
 					() =>
 						new InvalidLibraryError({

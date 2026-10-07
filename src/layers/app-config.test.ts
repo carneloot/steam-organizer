@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { ConfigProvider, Effect, Redacted } from 'effect';
+import { ConfigProvider, Effect, Layer, Redacted } from 'effect';
 
 import { AppConfig } from '../services/app-config.js';
 import { AppConfigLayer } from './app-config.js';
@@ -16,13 +16,16 @@ describe('AppConfig', () => {
 			assert.notInclude(JSON.stringify(config), 'jev-secret');
 			assert.notInclude(JSON.stringify(config), 'steam-secret');
 		}).pipe(
-			Effect.provide(AppConfigLayer),
 			Effect.provide(
-				ConfigProvider.layer(
-					ConfigProvider.fromUnknown({
-						TYPESAFE_API_KEY: 'jev-secret',
-						STEAM_API_KEY: 'steam-secret',
-					}),
+				AppConfigLayer.pipe(
+					Layer.provide(
+						ConfigProvider.layer(
+							ConfigProvider.fromUnknown({
+								TYPESAFE_API_KEY: 'jev-secret',
+								STEAM_API_KEY: 'steam-secret',
+							}),
+						),
+					),
 				),
 			),
 		),
@@ -33,8 +36,11 @@ describe('AppConfig', () => {
 			assert.strictEqual(config.jevApiKey, null);
 			assert.strictEqual(config.steamApiKey, null);
 		}).pipe(
-			Effect.provide(AppConfigLayer),
-			Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+			Effect.provide(
+				AppConfigLayer.pipe(
+					Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+				),
+			),
 		),
 	);
 	it.effect.each(['TYPESAFE_API_KEY', 'STEAM_API_KEY'])(
@@ -44,10 +50,13 @@ describe('AppConfig', () => {
 				const error = yield* Effect.flatMap(AppConfig, () =>
 					Effect.die('invalid configuration must fail before service use'),
 				).pipe(
-					Effect.provide(AppConfigLayer),
 					Effect.provide(
-						ConfigProvider.layer(
-							ConfigProvider.fromUnknown({ [name]: ' \t ' }),
+						AppConfigLayer.pipe(
+							Layer.provide(
+								ConfigProvider.layer(
+									ConfigProvider.fromUnknown({ [name]: ' \t ' }),
+								),
+							),
 						),
 					),
 					Effect.flip,
@@ -61,12 +70,15 @@ describe('AppConfig', () => {
 		() =>
 			Effect.gen(function* () {
 				const error = yield* Effect.flatMap(AppConfig, Effect.succeed).pipe(
-					Effect.provide(AppConfigLayer),
 					Effect.provide(
-						ConfigProvider.layer(
-							ConfigProvider.make(() =>
-								Effect.fail(
-									new ConfigProvider.SourceError({ message: 'do-not-log' }),
+						AppConfigLayer.pipe(
+							Layer.provide(
+								ConfigProvider.layer(
+									ConfigProvider.make(() =>
+										Effect.fail(
+											new ConfigProvider.SourceError({ message: 'do-not-log' }),
+										),
+									),
 								),
 							),
 						),

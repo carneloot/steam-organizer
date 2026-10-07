@@ -294,7 +294,7 @@ const review = Command.make(
 						}),
 				),
 			);
-			criteria = yield* Schema.decodeUnknownEffect(
+			criteria = yield* Schema.decodeEffect(
 				CategoryCriteria.pipe(Schema.fromJsonString),
 			)(text).pipe(
 				Effect.mapError(

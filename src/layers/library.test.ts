@@ -181,7 +181,7 @@ describe('library', () => {
 				exportLibrary(library, 'csv'),
 				'appid,name,playtime_minutes,categories,tags,reviewed\n"620","Game, ""Deluxe""\nEdition","75","Sampled; Co-op","Co-op","false"',
 			);
-			const json = yield* Schema.decodeUnknownEffect(
+			const json = yield* Schema.decodeEffect(
 				Schema.Unknown.pipe(Schema.fromJsonString),
 			)(exportLibrary(library, 'json'));
 			assert.deepStrictEqual(json, {

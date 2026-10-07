@@ -22,9 +22,7 @@ describe('CategoryCriteria boundary', () => {
 	it.effect('validates built-in criteria', () =>
 		Effect.gen(function* () {
 			assert.deepStrictEqual(
-				yield* Schema.decodeUnknownEffect(CategoryCriteria)(
-					defaultCategoryCriteria,
-				),
+				yield* Schema.decodeEffect(CategoryCriteria)(defaultCategoryCriteria),
 				defaultCategoryCriteria,
 			);
 		}),

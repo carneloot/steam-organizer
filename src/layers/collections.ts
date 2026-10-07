@@ -29,7 +29,7 @@ const Collection = Schema.Struct({ name: Schema.String }).pipe(
 const extractCategoryCriteria = Effect.fn(
 	'Collections.extractCategoryCriteria',
 )(function* (input: string) {
-	const entries = yield* Schema.decodeUnknownEffect(
+	const entries = yield* Schema.decodeEffect(
 		CloudStorage.pipe(Schema.fromJsonString),
 	)(input).pipe(
 		Effect.mapError(
@@ -68,7 +68,7 @@ const extractCategoryCriteria = Effect.fn(
 					}),
 			),
 		);
-		const name = yield* Schema.decodeUnknownEffect(Category)(
+		const name = yield* Schema.decodeEffect(Category)(
 			collection.name.trim(),
 		).pipe(
 			Effect.mapError(
@@ -87,7 +87,7 @@ const extractCategoryCriteria = Effect.fn(
 		});
 	}
 	const defaults = new Map(Object.entries(defaultCategoryCriteria));
-	return yield* Schema.decodeUnknownEffect(CategoryCriteria)(
+	return yield* Schema.decodeEffect(CategoryCriteria)(
 		Object.fromEntries(
 			[...names]
 				.sort()

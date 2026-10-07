@@ -14,7 +14,7 @@ export const SteamGame = Schema.Struct({
 	playtime_forever: Schema.Natural,
 	playtime_2weeks: Schema.optionalKey(Schema.Natural),
 });
-export interface SteamGame extends Schema.Schema.Type<typeof SteamGame> {}
+export type SteamGame = Schema.Schema.Type<typeof SteamGame>;
 
 const uniqueAppIds = Schema.makeFilter<
 	ReadonlyArray<{ readonly appid: number }>
@@ -34,14 +34,14 @@ export const Game = Schema.Struct({
 	tags: Schema.Array(Category).check(Schema.isUnique()),
 	reviewed: Schema.Boolean,
 });
-export interface Game extends Schema.Schema.Type<typeof Game> {}
+export type Game = Schema.Schema.Type<typeof Game>;
 
 export const Library = Schema.Struct({
 	version: Schema.Literal(1),
 	steamId: Schema.NullOr(SteamId),
 	games: Schema.Array(Game).check(uniqueAppIds),
 });
-export interface Library extends Schema.Schema.Type<typeof Library> {}
+export type Library = Schema.Schema.Type<typeof Library>;
 
 export const emptyLibrary = (): Library => ({
 	version: 1,
