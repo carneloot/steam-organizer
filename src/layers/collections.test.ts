@@ -1,8 +1,14 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Schema } from 'effect';
 
-import { extractCategoryCriteria } from './collections.js';
-import { CategoryCriteria } from './jev.js';
+import { CategoryCriteria } from '../domain/classification.js';
+import { Collections } from '../services/collections.js';
+import { CollectionsLayer } from './collections.js';
+
+const extractCategoryCriteria = (input: string) =>
+	Effect.flatMap(Collections, (collections) =>
+		collections.extractCategoryCriteria(input),
+	).pipe(Effect.provide(CollectionsLayer));
 
 describe('Steam collection extraction', () => {
 	it.effect(

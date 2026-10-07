@@ -2,10 +2,15 @@ import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, FileSystem, Layer } from 'effect';
 
-import { AppError, emptyLibrary, mergeLibrary, updateGame } from './library.js';
-import { LibraryStore } from './store.js';
+import { AppError, emptyLibrary, mergeLibrary } from '../domain/library.js';
+import { LibraryStore } from '../services/library-store.js';
+import { LibraryService } from '../services/library.js';
+import { FileLibraryStoreLayer } from './library-store.js';
+import { LibraryLayer } from './library.js';
 
-const layer = LibraryStore.layer.pipe(Layer.provideMerge(NodeServices.layer));
+const layer = Layer.mergeAll(FileLibraryStoreLayer, LibraryLayer).pipe(
+	Layer.provideMerge(NodeServices.layer),
+);
 const seed = mergeLibrary(
 	emptyLibrary(),
 	[{ appid: 620, name: 'Portal 2', playtime_forever: 480 }],
@@ -19,12 +24,13 @@ describe('LibraryStore', () => {
 			const directory = yield* fs.makeTempDirectoryScoped();
 			const file = `${directory}/nested/library.json`;
 			const store = yield* LibraryStore;
+			const libraryService = yield* LibraryService;
 			assert.deepStrictEqual(yield* store.load(file), emptyLibrary());
 			yield* store.modify(file, () => Effect.succeed(seed));
 			assert.isFalse(yield* fs.exists(`${file}.lock`));
 			assert.strictEqual((yield* fs.stat(file)).mode & 0o777, 0o600);
 			yield* store.modify(file, (library) =>
-				updateGame(library, 620, (game) => ({
+				libraryService.updateGame(library, 620, (game) => ({
 					...game,
 					tags: ['Co-op'],
 					reviewed: true,

@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { Schema } from 'effect';
 
 export class AppError extends Schema.TaggedError<AppError>()('AppError', {
 	message: Schema.String,
@@ -53,43 +53,6 @@ export const emptyLibrary = (): Library => ({
 	games: [],
 });
 
-export const decodeImport = Effect.fn('Library.decodeImport')(function* (
-	input: string,
-) {
-	const parsed = yield* Schema.decodeUnknownEffect(
-		Schema.Union([SteamGames, OwnedGamesResponse]).pipe(Schema.fromJsonString),
-	)(input).pipe(
-		Effect.mapError(
-			() =>
-				new AppError({
-					message:
-						'Invalid import. Expected a Steam GetOwnedGames response or an array of games with appid, name and playtime_forever. App IDs must be unique.',
-				}),
-		),
-	);
-	if ('response' in parsed) return yield* gamesFromResponse(parsed);
-	return parsed;
-});
-
-export const gamesFromResponse = Effect.fn('Steam.gamesFromResponse')(
-	function* (payload: Schema.Schema.Type<typeof OwnedGamesResponse>) {
-		const { games, game_count } = payload.response;
-		if (games === undefined && game_count !== 0) {
-			return yield* new AppError({
-				message:
-					'Steam did not return a library. Check the Steam ID, API key and Game details privacy settings. Your saved library was not changed.',
-			});
-		}
-		if (game_count !== undefined && game_count !== (games?.length ?? 0)) {
-			return yield* new AppError({
-				message:
-					'Steam returned an inconsistent game count. Your saved library was not changed.',
-			});
-		}
-		return games ?? [];
-	},
-);
-
 export function mergeLibrary(
 	previous: Library,
 	games: ReadonlyArray<SteamGame>,
@@ -141,24 +104,6 @@ export function selectGames(
 		)
 		.sort((a, b) => a.name.localeCompare(b.name) || a.appid - b.appid);
 }
-
-export const updateGame = Effect.fn('Library.updateGame')(function* (
-	library: Library,
-	appid: number,
-	update: (game: Game) => Game,
-) {
-	if (!library.games.some((game) => game.appid === appid)) {
-		return yield* new AppError({
-			message: `No game with app ID ${appid}. Use list to find an ID.`,
-		});
-	}
-	return {
-		...library,
-		games: library.games.map((game) =>
-			game.appid === appid ? update(game) : game,
-		),
-	};
-});
 
 export function exportLibrary(
 	library: Library,

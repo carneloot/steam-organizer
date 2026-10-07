@@ -4,27 +4,31 @@ import { Console, Effect, FileSystem, Layer, Schema } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
 
-import { extractCategoryCriteria } from './collections.js';
 import {
 	CategoryCriteria,
-	classifyGame,
 	defaultCategoryCriteria,
-} from './jev.js';
+} from './domain/classification.js';
 import {
 	AppError,
 	AppId,
 	categories,
 	Category,
-	decodeImport,
 	exportLibrary,
 	mergeLibrary,
 	selectGames,
 	SteamId,
 	terminalText,
-	updateGame,
-} from './library.js';
-import { fetchLibrary } from './steam.js';
-import { LibraryStore } from './store.js';
+} from './domain/library.js';
+import { CollectionsLayer } from './layers/collections.js';
+import { JevLayer } from './layers/jev.js';
+import { FileLibraryStoreLayer } from './layers/library-store.js';
+import { LibraryLayer } from './layers/library.js';
+import { SteamLayer } from './layers/steam.js';
+import { Classifier } from './services/classifier.js';
+import { Collections } from './services/collections.js';
+import { LibraryStore } from './services/library-store.js';
+import { LibraryService } from './services/library.js';
+import { Steam } from './services/steam.js';
 
 const root = Command.make('steam-categorizer').pipe(
 	Command.withDescription(
@@ -48,7 +52,8 @@ const sync = Command.make(
 	Effect.fn('CLI.sync')(function* ({ steamId }) {
 		const { file } = yield* root;
 		const store = yield* LibraryStore;
-		const games = yield* fetchLibrary(steamId);
+		const steam = yield* Steam;
+		const games = yield* steam.fetchLibrary(steamId);
 		const library = yield* store.modify(
 			file,
 			Effect.fn(function* (previous) {
@@ -87,7 +92,8 @@ const importCommand = Command.make(
 					}),
 			),
 		);
-		const games = yield* decodeImport(text);
+		const library = yield* LibraryService;
+		const games = yield* library.decodeImport(text);
 		const store = yield* LibraryStore;
 		yield* store.modify(file, (previous) =>
 			Effect.succeed(mergeLibrary(previous, games, previous.steamId)),
@@ -113,7 +119,8 @@ const extractCategories = Command.make(
 					}),
 			),
 		);
-		const criteria = yield* extractCategoryCriteria(text);
+		const collections = yield* Collections;
+		const criteria = yield* collections.extractCategoryCriteria(text);
 		yield* Console.log(JSON.stringify(criteria, null, 2));
 		yield* Console.error(
 			`Extracted ${Object.keys(criteria).length} categories. Review the descriptions before classification, especially personal collections. Redirect stdout to a new categories file.`,
@@ -209,8 +216,9 @@ const tag = Command.make(
 	Effect.fn('CLI.tag')(function* ({ appid, tags }) {
 		const { file } = yield* root;
 		const store = yield* LibraryStore;
+		const libraryService = yield* LibraryService;
 		yield* store.modify(file, (library) =>
-			updateGame(library, appid, (game) => ({
+			libraryService.updateGame(library, appid, (game) => ({
 				...game,
 				tags: [...new Set([...game.tags, ...tags])],
 			})),
@@ -225,8 +233,9 @@ const untag = Command.make(
 	Effect.fn('CLI.untag')(function* ({ appid, tags }) {
 		const { file } = yield* root;
 		const store = yield* LibraryStore;
+		const libraryService = yield* LibraryService;
 		yield* store.modify(file, (library) =>
-			updateGame(library, appid, (game) => ({
+			libraryService.updateGame(library, appid, (game) => ({
 				...game,
 				tags: game.tags.filter((tag) => !tags.includes(tag)),
 			})),
@@ -285,14 +294,21 @@ const review = Command.make(
 		}
 		const store = yield* LibraryStore;
 		const initial = yield* store.load(file);
+		const classifier = yield* Classifier;
+		const steam = yield* Steam;
+		const libraryService = yield* LibraryService;
 		const games = selectGames(initial, search, category, !all);
 		for (const game of games) {
 			yield* Console.log(
 				`\n${terminalText(game.name)} (${game.appid}) | ${(game.playtime_forever / 60).toFixed(1)}h | ${categories(game).join(', ')}`,
 			);
-			const tags = yield* classifyGame(game, criteria);
+			const description = yield* steam.fetchGameDescription(game.appid);
+			const tags = yield* classifier.classifyGame(
+				{ appid: game.appid, name: game.name, description },
+				criteria,
+			);
 			yield* store.modify(file, (library) =>
-				updateGame(library, game.appid, (current) => ({
+				libraryService.updateGame(library, game.appid, (current) => ({
 					...current,
 					tags: [...new Set([...current.tags, ...tags])],
 					reviewed: true,
@@ -329,7 +345,14 @@ const exportCommand = Command.make(
 	),
 );
 
-const storeLayer = LibraryStore.layer.pipe(Layer.provide(NodeServices.layer));
+const steamLayer = SteamLayer.pipe(Layer.provide(LibraryLayer));
+const appLayer = Layer.mergeAll(
+	LibraryLayer,
+	CollectionsLayer,
+	FileLibraryStoreLayer,
+	steamLayer,
+	JevLayer,
+).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(NodeServices.layer));
 root.pipe(
 	Command.withSubcommands([
 		sync,
@@ -352,8 +375,7 @@ root.pipe(
 			),
 		),
 	),
-	Effect.provide(storeLayer),
-	Effect.provide(FetchHttpClient.layer),
+	Effect.provide(appLayer),
 	Effect.provide(NodeServices.layer),
 	NodeRuntime.runMain,
 );

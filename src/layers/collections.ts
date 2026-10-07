@@ -1,7 +1,15 @@
-import { Effect, Schema } from 'effect';
+import { Effect, Layer, Schema } from 'effect';
 
-import { CategoryCriteria, defaultCategoryCriteria } from './jev.js';
-import { AppError, Category } from './library.js';
+import {
+	CategoryCriteria,
+	defaultCategoryCriteria,
+} from '../domain/classification.js';
+import { AppError, Category } from '../domain/library.js';
+import { Collections } from '../services/collections.js';
+
+export const CollectionsLayer = Layer.sync(Collections, () =>
+	Collections.of({ extractCategoryCriteria }),
+);
 
 const CloudStorage = Schema.Array(
 	Schema.Tuple([Schema.String, Schema.Unknown]),
@@ -14,7 +22,7 @@ const Collection = Schema.Struct({ name: Schema.String }).pipe(
 	Schema.fromJsonString,
 );
 
-export const extractCategoryCriteria = Effect.fn(
+const extractCategoryCriteria = Effect.fn(
 	'Collections.extractCategoryCriteria',
 )(function* (input: string) {
 	const entries = yield* Schema.decodeUnknownEffect(

@@ -3,7 +3,17 @@ import { ConfigProvider, Deferred, Effect, Fiber, Predicate } from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
 import { TestClock } from 'effect/testing';
 
-import { classifyGame } from './jev.js';
+import type {
+	CategoryCriteria,
+	ClassificationGame,
+} from '../domain/classification.js';
+import { Classifier } from '../services/classifier.js';
+import { JevLayer } from './jev.js';
+
+const classifyGame = (game: ClassificationGame, criteria?: CategoryCriteria) =>
+	Effect.flatMap(Classifier, (classifier) =>
+		classifier.classifyGame(game, criteria),
+	).pipe(Effect.provide(JevLayer));
 
 const config = ConfigProvider.layer(
 	ConfigProvider.fromUnknown({ TYPESAFE_API_KEY: 'jev-test-secret' }),
@@ -11,6 +21,7 @@ const config = ConfigProvider.layer(
 const game = {
 	appid: 620,
 	name: 'Portal 2',
+	description: null,
 	playtime_forever: 123,
 	tags: ['Favorites'],
 	reviewed: false,
@@ -41,11 +52,7 @@ describe('Jev adapter', () => {
 				};
 				const client = HttpClient.make((request) =>
 					Effect.sync(() => {
-						if (request.method === 'GET')
-							return HttpClientResponse.fromWeb(
-								request,
-								Response.json({ 620: { success: false } }),
-							);
+						assert.strictEqual(request.method, 'POST');
 						if (!Predicate.isTagged(request.body, 'Uint8Array'))
 							throw new Error('Expected JSON body');
 						const payload = JSON.parse(
@@ -110,26 +117,13 @@ describe('Jev adapter', () => {
 		'Cooperative spatial puzzles in a dedicated campaign.',
 		null,
 	])(
-		'sends typed questions with the description when available: %s',
+		'sends the supplied description without looking it up: %s',
 		(description) =>
 			Effect.gen(function* () {
+				let calls = 0;
 				const client = HttpClient.make((request, url) =>
 					Effect.sync(() => {
-						if (url.origin === 'https://store.steampowered.com') {
-							assert.strictEqual(request.headers.authorization, undefined);
-							return HttpClientResponse.fromWeb(
-								request,
-								Response.json({
-									620:
-										description === null
-											? { success: false }
-											: {
-													success: true,
-													data: { detailed_description: description },
-												},
-								}),
-							);
-						}
+						calls++;
 						assert.strictEqual(
 							url.href,
 							'https://api.typesafe.ai/v1/systemone',
@@ -167,11 +161,12 @@ describe('Jev adapter', () => {
 					}),
 				);
 				assert.deepStrictEqual(
-					yield* classifyGame(game).pipe(
+					yield* classifyGame({ ...game, description }).pipe(
 						Effect.provideService(HttpClient.HttpClient, client),
 					),
 					['Puzzle', 'Co-op'],
 				);
+				assert.strictEqual(calls, 1);
 			}).pipe(Effect.provide(config)),
 	);
 
@@ -203,13 +198,6 @@ describe('Jev adapter', () => {
 			Effect.gen(function* () {
 				let calls = 0;
 				const client = HttpClient.make((request) => {
-					if (request.method === 'GET')
-						return Effect.succeed(
-							HttpClientResponse.fromWeb(
-								request,
-								Response.json({ 620: { success: false } }),
-							),
-						);
 					calls++;
 					return Effect.succeed(
 						HttpClientResponse.fromWeb(
@@ -251,13 +239,6 @@ describe('Jev adapter', () => {
 			Effect.gen(function* () {
 				let calls = 0;
 				const client = HttpClient.make((request) => {
-					if (request.method === 'GET')
-						return Effect.succeed(
-							HttpClientResponse.fromWeb(
-								request,
-								Response.json({ 620: { success: false } }),
-							),
-						);
 					calls++;
 					return Effect.fail(
 						new HttpClientError.HttpClientError({
@@ -285,11 +266,6 @@ describe('Jev adapter', () => {
 				const started = yield* Deferred.make<void>();
 				const client = HttpClient.make((request) =>
 					Effect.gen(function* () {
-						if (request.method === 'GET')
-							return HttpClientResponse.fromWeb(
-								request,
-								Response.json({ 620: { success: false } }),
-							);
 						yield* Deferred.succeed(started, undefined);
 						if (!body) return yield* Effect.never;
 						return HttpClientResponse.fromWeb(

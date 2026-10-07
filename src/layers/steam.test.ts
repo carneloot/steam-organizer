@@ -1,9 +1,21 @@
 import { assert, describe, it } from '@effect/vitest';
-import { ConfigProvider, Deferred, Effect, Fiber } from 'effect';
+import { ConfigProvider, Deferred, Effect, Fiber, Layer } from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
 import { TestClock } from 'effect/testing';
 
-import { fetchGameDescription, fetchLibrary } from './steam.js';
+import { Steam } from '../services/steam.js';
+import { LibraryLayer } from './library.js';
+import { SteamLayer } from './steam.js';
+
+const layer = SteamLayer.pipe(Layer.provide(LibraryLayer));
+const fetchGameDescription = (appid: number) =>
+	Effect.flatMap(Steam, (steam) => steam.fetchGameDescription(appid)).pipe(
+		Effect.provide(layer),
+	);
+const fetchLibrary = (steamId: string) =>
+	Effect.flatMap(Steam, (steam) => steam.fetchLibrary(steamId)).pipe(
+		Effect.provide(layer),
+	);
 
 const config = ConfigProvider.layer(
 	ConfigProvider.fromUnknown({ STEAM_API_KEY: 'test-secret-never-log' }),

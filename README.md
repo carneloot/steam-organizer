@@ -51,7 +51,7 @@ Each successful classification saves immediately and marks the game reviewed, ev
 
 Use `--search` and `--category` to limit classification, for example `classify --category Unplayed`. Games reviewed manually in older versions are skipped unless you use `--all`.
 
-Classification sends game names, app IDs, and available store descriptions to TypeSafe and may incur API charges. Steam IDs, playtime, and existing tags are not sent. The API key is not saved. Each game's classification has a 30-second deadline, including the description lookup and response decoding. Failed Jev requests are not retried automatically to avoid duplicate charges; run the command again to resume.
+Classification sends game names, app IDs, and available store descriptions to TypeSafe and may incur API charges. Steam IDs, playtime, and existing tags are not sent. The API key is not saved. The CLI fetches the description first with a five-second deadline, then calls the classifier with a separate 30-second deadline, including response decoding. Failed Jev requests are not retried automatically to avoid duplicate charges; run the command again to resume.
 
 ## Customize classification categories
 
@@ -82,7 +82,7 @@ node dist/cli.js classify --all --categories-file my-categories.json
 
 Existing tags and playtime groups are preserved. Changing the file does not automatically reclassify games or remove old tags. Use `untag` to remove tags you no longer want.
 
-Library callers can pass the same category map as the second argument to `classifyGame(game, criteria)`. The exported `defaultCategoryCriteria` map can be spread into a custom map to extend or override the defaults.
+Callers obtain the `Classifier` service and pass the same category map as the second argument to `classifier.classifyGame(game, criteria)`. The game input contains `appid`, `name`, and `description`, which is a string or `null` when unavailable. The classifier does not fetch descriptions. The exported `defaultCategoryCriteria` map in `src/domain/classification.ts` can be spread into a custom map to extend or override the defaults.
 
 ## Extract categories from Steam collections
 
@@ -184,6 +184,52 @@ To back up or restore all decisions, copy the library JSON file directly. The `i
 By default, commands use `.steam-categorizer/library.json` relative to your current directory. Pass `--file /path/to/library.json` to use a fixed location. Writes use a temporary file and atomic rename. On Unix, saved files have owner-only permissions.
 
 If a command reports a locked library, wait for the writer to finish. After a crash, remove the named `.lock` directory only after confirming that no command is writing that library.
+
+## Source structure
+
+```text
+src/
+├── cli.ts                     # Commands and runtime layer composition
+├── cli.test.ts                # CLI integration tests
+├── domain/
+│   ├── classification.ts      # Classifier input and category criteria
+│   └── library.ts             # Schemas and pure library transformations
+├── services/
+│   ├── classifier.ts          # Classifier contract
+│   ├── collections.ts         # Collections contract
+│   ├── library.ts             # LibraryService contract
+│   ├── library-store.ts       # LibraryStore persistence contract
+│   └── steam.ts               # Steam contract
+└── layers/
+    ├── collections.ts         # CollectionsLayer
+    ├── jev.ts                 # JevLayer implements Classifier
+    ├── library.ts             # LibraryLayer
+    ├── library-store.ts       # FileLibraryStoreLayer
+    ├── steam.ts               # SteamLayer uses HttpClient and LibraryService
+    └── *.test.ts              # Implementation tests
+```
+
+List the source files with `rg --files src`. Service methods expose their result and error types without implementation dependencies. Layers acquire dependencies once and supply those methods. Pure functions, such as category derivation and library merging, stay in `domain/`.
+
+`JevLayer` requires only an HTTP client. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
+
+```ts
+import { Effect } from 'effect';
+import { FetchHttpClient } from 'effect/http';
+import { JevLayer } from './src/layers/jev.js';
+import { Classifier } from './src/services/classifier.js';
+
+const classify = Effect.gen(function* () {
+	const classifier = yield* Classifier;
+	return yield* classifier.classifyGame({
+		appid: 620,
+		name: 'Portal 2',
+		description: 'Cooperative spatial puzzles in a dedicated campaign.',
+	});
+}).pipe(Effect.provide(JevLayer), Effect.provide(FetchHttpClient.layer));
+```
+
+The Jev and Steam implementations read their API keys when the corresponding method runs, so offline commands do not require credentials. Tests provide layers with fake HTTP clients and configuration providers.
 
 ## Check changes
 

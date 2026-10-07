@@ -3,15 +3,29 @@ import { Effect, Schema } from 'effect';
 
 import {
 	categories,
-	decodeImport,
 	emptyLibrary,
 	exportLibrary,
 	Game,
 	mergeLibrary,
 	selectGames,
 	terminalText,
-	updateGame,
-} from './library.js';
+} from '../domain/library.js';
+import type { Library } from '../domain/library.js';
+import { LibraryService } from '../services/library.js';
+import { LibraryLayer } from './library.js';
+
+const decodeImport = (input: string) =>
+	Effect.flatMap(LibraryService, (library) => library.decodeImport(input)).pipe(
+		Effect.provide(LibraryLayer),
+	);
+const updateGame = (
+	library: Library,
+	appid: number,
+	update: (game: Game) => Game,
+) =>
+	Effect.flatMap(LibraryService, (service) =>
+		service.updateGame(library, appid, update),
+	).pipe(Effect.provide(LibraryLayer));
 
 const game = (minutes: number, recent = 0): Game => ({
 	appid: 620,
