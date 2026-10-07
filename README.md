@@ -1,8 +1,60 @@
 # Steam categorizer
 
-Organize your Steam library with an Effect v4 CLI. Sync your games, classify them automatically with TypeSafe's Jev model, and keep tags locally.
+Organize your Steam library with a Foldkit web app or an Effect v4 CLI. Sync games, import Steam files, and classify games with TypeSafe's Jev model.
 
-The CLI does not edit collections in the Steam client. Its runtime dependencies are `effect@4.0.1` and `@effect/platform-node@4.0.1`. TypeScript, `tsx`, Vitest, `@effect/vitest`, Oxlint, and Oxfmt are development tooling.
+Neither interface edits collections in the Steam client. Effect packages are pinned to `4.0.0` to match Foldkit's peer dependency. The CLI keeps its library locally; the web app saves private libraries and category definitions in Cloudflare D1.
+
+## Run the web app locally
+
+Use Node.js 22.19 or newer. Build the assets and initialize the local database:
+
+```sh
+npm ci
+npm run web:build
+npm run web:db
+```
+
+Run `npm run web:api` and `npm run web:dev` in separate terminals. Open the Vite address printed in the second terminal. Local development uses a shared test identity, not Cloudflare Access. The bypass requires a loopback request and is absent from the Alchemy deployment.
+
+To enable Steam sync and classification locally, put `STEAM_API_KEY` and `TYPESAFE_API_KEY` in `web/.dev.vars`. This file is ignored by Git. Without keys, imports, editing, exports, and category definitions still work. Never put keys in `VITE_*` variables.
+
+## Import a library
+
+Choose **Import** and upload or paste one of these JSON formats:
+
+- A CLI library file, including its Steam ID, tags, and review flags.
+- CLI export JSON.
+- Steam `GetOwnedGames` JSON or a raw game array.
+
+Confirm replacement before importing. Steam game data refreshes matching games while preserving existing tags and review flags. A CLI library import restores its own saved tags and flags. Games absent from the import are removed.
+
+After importing games, use **Steam memberships** to upload a Steam `cloud-storage-namespace-1.json` file. Static collection membership becomes tags on matching app IDs. Deleted collections and removed memberships are excluded. Dynamic collection filters are skipped, not reconstructed. This file cannot supply game names or playtime on its own.
+
+Use **Category criteria** to edit classification questions or import a criteria JSON file. **Import collection names** converts Steam collection names into editable definitions without importing membership. Category definitions are saved under your verified sign-in and the active Steam ID. Offline imports use a separate offline key. Unsaved drafts remain in the tab. Download category JSON separately from the library backup.
+
+## Background classification
+
+**Classify** submits the current search and category filter to a Cloudflare Workflow. Jobs snapshot category definitions and process at most 500 games. The Workflow saves each game's results in D1 and continues after the tab closes. Reopening the app loads saved progress. **Cancel job** stops at the next game boundary, preserving any in-flight result.
+
+Paid requests are not automatically retried. If a provider response is lost, the app blocks further classification until you explicitly clear the uncertain paid lock. Recovery can cause duplicate charges. Starting a new job skips already reviewed games unless you select the option to include them.
+
+## Deploy privately with Alchemy
+
+Deployment provisions a Worker, D1, a rate-limit Durable Object, a Workflow, and Cloudflare Access with email PIN login. Allowlists protect the app, API, and preview URLs. Each authenticated email owns an isolated library. Entering a Steam ID does not prove Steam ownership; sync requires that account's game details to be public.
+
+Configure a Cloudflare account and Zero Trust organization before deploying. Authenticate Alchemy with Cloudflare, following the [Alchemy setup guide](https://alchemy.run). Set `ACCESS_EMAILS` to explicit comma-separated addresses for you and your friends. Supply the two API keys as server-side deployment secrets or environment variables. `.env.sample` lists the names.
+
+When you are ready to create cloud resources, run:
+
+```sh
+npm run web:deploy
+```
+
+Alchemy state is stored locally in `.alchemy/`. Keep that state backed up and use the same checkout and stage for subsequent deployments. Do not deploy `web/wrangler.local.jsonc`; it is exclusively for the emulator. Add friends by updating `ACCESS_EMAILS` and redeploying.
+
+All invited users share the deployed Steam and TypeSafe credentials and their costs. API keys never reach the browser. Classification sends game names, app IDs, descriptions, and your category questions to TypeSafe, not Steam IDs or existing tags. Libraries and category definitions are server-side, not browser-only.
+
+The cloud deployment and live Access login require verification after provisioning. Local tests use mocked provider traffic and do not incur charges. Alchemy and the current Wrangler runtime are pinned prerelease tooling; inspect `npm audit` before deploying. Production browser dependencies have no reported vulnerabilities, but development tooling currently includes upstream audit findings.
 
 ## Run the CLI
 

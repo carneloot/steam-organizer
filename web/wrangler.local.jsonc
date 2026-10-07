@@ -1,0 +1,33 @@
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "steam-organizer-local",
+	"main": "server/worker.ts",
+	"compatibility_date": "2026-10-07",
+	"compatibility_flags": ["nodejs_compat"],
+	"vars": { "LOCAL_DEV": "true" },
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS",
+		"run_worker_first": true,
+		"not_found_handling": "single-page-application",
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "organizer",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations",
+		},
+	],
+	"durable_objects": {
+		"bindings": [{ "name": "COORDINATOR", "class_name": "ApiCoordinator" }],
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["ApiCoordinator"] }],
+	"workflows": [
+		{
+			"binding": "CLASSIFICATION",
+			"name": "classification-local",
+			"class_name": "ClassificationWorkflow",
+		},
+	],
+}

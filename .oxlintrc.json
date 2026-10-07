@@ -9,7 +9,12 @@
 		"builtin": true,
 		"node": true
 	},
-	"ignorePatterns": ["node_modules/**", "dist/**", "tools/oxlint/anti-slop/**"],
+	"ignorePatterns": [
+		"node_modules/**",
+		"**/dist/**",
+		"**/.wrangler/**",
+		"tools/oxlint/anti-slop/**"
+	],
 	"jsPlugins": [
 		{
 			"name": "anti-slop-effect",

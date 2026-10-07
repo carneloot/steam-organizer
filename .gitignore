@@ -4,3 +4,6 @@ dist/
 .env
 *.tmp
 .amp/portals/
+.alchemy/
+**/.wrangler/
+**/.dev.vars*
