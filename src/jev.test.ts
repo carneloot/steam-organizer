@@ -31,6 +31,81 @@ const answers = {
 };
 
 describe('Jev adapter', () => {
+	it.effect.each([false, true])(
+		'uses only supplied category criteria, missing answer: %s',
+		(missing) =>
+			Effect.gen(function* () {
+				const criteria = {
+					'Cozy farming': 'Includes farming and low-pressure play.',
+					Competitive: 'Players compete against each other.',
+				};
+				const client = HttpClient.make((request) =>
+					Effect.sync(() => {
+						if (request.method === 'GET')
+							return HttpClientResponse.fromWeb(
+								request,
+								Response.json({ 620: { success: false } }),
+							);
+						if (!Predicate.isTagged(request.body, 'Uint8Array'))
+							throw new Error('Expected JSON body');
+						const payload = JSON.parse(
+							new TextDecoder().decode(request.body.body),
+						);
+						assert.deepStrictEqual(Object.keys(payload.questions), [
+							'Cozy farming',
+							'Competitive',
+						]);
+						assert.strictEqual(
+							payload.questions['Cozy farming'].criteria.true,
+							'Includes farming and low-pressure play.',
+						);
+						assert.strictEqual(
+							payload.questions.Competitive.criteria.true,
+							'Players compete against each other.',
+						);
+						return HttpClientResponse.fromWeb(
+							request,
+							Response.json({
+								answers: {
+									'Cozy farming': { type: 'noul', noul: 0.8 },
+									...(missing
+										? {}
+										: { Competitive: { type: 'noul', noul: 0.799 } }),
+									Favorites: { type: 'noul', noul: 1 },
+								},
+							}),
+						);
+					}),
+				);
+				const result = classifyGame(game, criteria).pipe(
+					Effect.provideService(HttpClient.HttpClient, client),
+				);
+				if (missing)
+					assert.include((yield* result.pipe(Effect.flip)).message, 'omitted');
+				else assert.deepStrictEqual(yield* result, ['Cozy farming']);
+			}).pipe(Effect.provide(config)),
+	);
+
+	it.effect.each([
+		{},
+		{ '': 'Some description' },
+		{ ' Untrimmed': 'Description' },
+		{ 'Bad\nname': 'Description' },
+		{ Valid: '' },
+		{ Valid: '   ' },
+	])(
+		'rejects invalid category criteria before making requests: %s',
+		(criteria) =>
+			Effect.gen(function* () {
+				const client = HttpClient.make(() => Effect.die('must not request'));
+				const error = yield* classifyGame(game, criteria).pipe(
+					Effect.provideService(HttpClient.HttpClient, client),
+					Effect.flip,
+				);
+				assert.include(error.message, 'Invalid categories');
+			}).pipe(Effect.provide(config)),
+	);
+
 	it.effect.each([
 		'Cooperative spatial puzzles in a dedicated campaign.',
 		null,

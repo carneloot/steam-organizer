@@ -1,10 +1,18 @@
 import { Config, Effect, Redacted, Schema } from 'effect';
 import { HttpClient, HttpClientRequest, HttpClientResponse } from 'effect/http';
 
-import { AppError, type Game } from './library.js';
+import { AppError, Category, type Game } from './library.js';
 import { fetchGameDescription } from './steam.js';
 
-const tagCriteria = {
+export const CategoryCriteria = Schema.Record(
+	Schema.String,
+	Schema.NonEmptyString.check(Schema.isTrimmed()),
+).check(Schema.isMinProperties(1), Schema.isPropertyNames(Category));
+export interface CategoryCriteria extends Schema.Schema.Type<
+	typeof CategoryCriteria
+> {}
+
+export const defaultCategoryCriteria = {
 	Action: 'Real-time combat or reflex-based action is a central mechanic.',
 	Adventure:
 		'Exploration and narrative-driven adventure are central mechanics.',
@@ -33,7 +41,21 @@ const JevResponse = Schema.Struct({
 });
 
 export const classifyGame = Effect.fn('Jev.classifyGame')(
-	function* (game: Game) {
+	function* (
+		game: Game,
+		categoryCriteria: CategoryCriteria = defaultCategoryCriteria,
+	) {
+		const criteria = yield* Schema.decodeUnknownEffect(CategoryCriteria)(
+			categoryCriteria,
+		).pipe(
+			Effect.mapError(
+				() =>
+					new AppError({
+						message:
+							'Invalid categories. Provide at least one category with a nonempty, trimmed name and description. Names cannot contain control characters.',
+					}),
+			),
+		);
 		const key = yield* Config.Redacted('TYPESAFE_API_KEY').pipe(
 			Effect.mapError(
 				() =>
@@ -49,7 +71,7 @@ export const classifyGame = Effect.fn('Jev.classifyGame')(
 		}
 		const description = yield* fetchGameDescription(game.appid);
 		const questions = Object.fromEntries(
-			Object.entries(tagCriteria).map(([tag, description]) => [
+			Object.entries(criteria).map(([tag, description]) => [
 				tag,
 				{
 					type: 'noul',
@@ -105,7 +127,7 @@ export const classifyGame = Effect.fn('Jev.classifyGame')(
 			),
 		);
 		const tags: string[] = [];
-		for (const tag of Object.keys(tagCriteria)) {
+		for (const tag of Object.keys(criteria)) {
 			const answer = payload.answers[tag];
 			if (answer === undefined) {
 				return yield* new AppError({

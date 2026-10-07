@@ -5,10 +5,87 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 describe('CLI integration', () => {
+	it('extracts a Steam collections file into a usable categories config without modifying source or library', () => {
+		const directory = mkdtempSync(join(tmpdir(), 'steam-collections-cli-'));
+		const input = join(directory, 'cloud storage namespace.json');
+		const output = join(directory, 'categories.json');
+		const library = join(directory, 'library.json');
+		const run = (...args: string[]) =>
+			spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
+				encoding: 'utf8',
+				timeout: 10_000,
+				env: { ...process.env, TYPESAFE_API_KEY: '' },
+			});
+		try {
+			const source = JSON.stringify([
+				[
+					'user-collections.uc-puzzle',
+					{ value: JSON.stringify({ name: 'Puzzle', added: [620] }) },
+				],
+				[
+					'user-collections.uc-custom',
+					{ value: JSON.stringify({ name: 'Cozy farming', filterSpec: {} }) },
+				],
+				[
+					'user-collections.deleted',
+					{ is_deleted: true, value: JSON.stringify({ name: 'Deleted' }) },
+				],
+			]);
+			writeFileSync(input, source);
+			writeFileSync(library, 'Must not be read or overwritten');
+			const extracted = run('--file', library, 'extract-categories', input);
+			assert.strictEqual(extracted.status, 0, extracted.stderr);
+			assert.deepStrictEqual(JSON.parse(extracted.stdout), {
+				'Cozy farming': 'Games matching the category "Cozy farming".',
+				Puzzle: 'Solving logical or spatial puzzles is a central mechanic.',
+			});
+			assert.include(extracted.stderr, 'Extracted 2 categories');
+			assert.strictEqual(readFileSync(input, 'utf8'), source);
+			assert.strictEqual(
+				readFileSync(library, 'utf8'),
+				'Must not be read or overwritten',
+			);
+			writeFileSync(output, extracted.stdout);
+			const accepted = run(
+				'--file',
+				join(directory, 'empty-library.json'),
+				'classify',
+				'--categories-file',
+				output,
+			);
+			assert.strictEqual(accepted.status, 0, accepted.stderr);
+			assert.include(accepted.stdout, 'Classified 0 games');
+			writeFileSync(
+				input,
+				JSON.stringify([
+					[
+						'user-collections.valid',
+						{ value: JSON.stringify({ name: 'Puzzle' }) },
+					],
+					['user-collections.invalid', { value: 'not JSON' }],
+				]),
+			);
+			const invalid = run('extract-categories', input);
+			assert.strictEqual(invalid.status, 1, invalid.stderr);
+			assert.strictEqual(invalid.stdout, '');
+			assert.include(invalid.stderr, 'Invalid Steam collection value');
+			const missing = run(
+				'extract-categories',
+				join(directory, 'missing.json'),
+			);
+			assert.strictEqual(missing.status, 1, missing.stderr);
+			assert.strictEqual(missing.stdout, '');
+			assert.include(missing.stderr, 'Cannot read collections');
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}, 30_000);
+
 	it('classifies without prompts, preserves tags, resumes after failure and supports filters and --all', () => {
 		const directory = mkdtempSync(join(tmpdir(), 'steam-jev-cli-'));
 		const file = join(directory, 'library.json');
 		const mock = join(directory, 'mock-jev.mjs');
+		const categoriesFile = join(directory, 'categories.json');
 		const initial = {
 			version: 1,
 			steamId: null,
@@ -74,8 +151,12 @@ describe('CLI integration', () => {
 					if (request.url !== 'https://api.typesafe.ai/v1/systemone') throw new Error('Unexpected endpoint');
 					const payload = await request.json();
 					if (payload.state.description !== 'Store description for ' + payload.state.appid) throw new Error('Missing store description');
+					if (payload.questions['Cozy farming']) {
+						if (Object.keys(payload.questions).join(',') !== 'Cozy farming,Competitive') throw new Error('Default categories were not replaced');
+						if (payload.questions['Cozy farming'].criteria.true !== 'Includes farming and low-pressure play.') throw new Error('Missing custom description');
+					}
 					if (String(payload.state.appid) === process.env.MOCK_FAIL || process.env.MOCK_FAIL === 'all') return Response.json({}, { status: 401 });
-					return Response.json({ answers: Object.fromEntries(Object.keys(payload.questions).map(tag => [tag, { type: 'noul', noul: ['Puzzle', 'Co-op'].includes(tag) ? 0.95 : 0.1 }])) });
+					return Response.json({ answers: Object.fromEntries(Object.keys(payload.questions).map(tag => [tag, { type: 'noul', noul: ['Puzzle', 'Co-op', 'Cozy farming'].includes(tag) ? 0.95 : 0.1 }])) });
 				};
 			`,
 			);
@@ -115,6 +196,69 @@ describe('CLI integration', () => {
 			assert.strictEqual(revisit.status, 0, revisit.stderr);
 			assert.include(revisit.stdout, 'Classified 1 games');
 			assert.strictEqual(readFileSync(file, 'utf8'), saved);
+			writeFileSync(
+				categoriesFile,
+				JSON.stringify({
+					'Cozy farming': 'Includes farming and low-pressure play.',
+					Competitive: 'Players compete against each other.',
+				}),
+			);
+			const custom = run(
+				'2',
+				'review',
+				'--all',
+				'--search',
+				'Alpha',
+				'--categories-file',
+				categoriesFile,
+			);
+			assert.strictEqual(custom.status, 0, custom.stderr);
+			assert.include(custom.stdout, 'Saved Jev tags: Cozy farming');
+			const customized = readFileSync(file, 'utf8');
+			const customGames = JSON.parse(customized).games;
+			assert.deepStrictEqual(customGames[0].tags, [
+				'Favorites',
+				'Puzzle',
+				'Co-op',
+				'Cozy farming',
+			]);
+			assert.deepStrictEqual(
+				customGames.slice(1),
+				JSON.parse(saved).games.slice(1),
+			);
+			for (const contents of [
+				'not JSON',
+				'{}',
+				'[]',
+				'{"Cozy":123}',
+				'{"Cozy":" "}',
+				'{" Bad":"Description"}',
+				'{"Bad\\nname":"Description"}',
+			]) {
+				writeFileSync(categoriesFile, contents);
+				const invalid = run(
+					'all',
+					'classify',
+					'--all',
+					'--categories-file',
+					categoriesFile,
+				);
+				assert.strictEqual(invalid.status, 1, invalid.stderr);
+				assert.include(
+					invalid.stdout + invalid.stderr,
+					'Invalid categories file',
+				);
+				assert.strictEqual(readFileSync(file, 'utf8'), customized);
+			}
+			const missing = run(
+				'all',
+				'classify',
+				'--categories-file',
+				join(directory, 'missing.json'),
+			);
+			assert.strictEqual(missing.status, 1, missing.stderr);
+			assert.include(missing.stdout + missing.stderr, 'Cannot read categories');
+			assert.strictEqual(readFileSync(file, 'utf8'), customized);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

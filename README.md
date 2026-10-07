@@ -39,19 +39,80 @@ unset TYPESAFE_API_KEY
 
 `classify` is an alias for `review`. Both now run without per-game prompts. Omit `--file` to classify your default library.
 
-The CLI calls `jev-latest` once per game, with all category questions in that request. It adds tags whose yes probability is at least 0.8:
+The CLI calls `jev-latest` once per game, with all category questions in that request. It adds tags whose yes probability is at least 0.8. The default categories are:
 
 `Action`, `Adventure`, `RPG`, `Strategy`, `Simulation`, `Puzzle`, `Platformer`, `Racing`, `Sports`, `Horror`, `Roguelike`, and `Co-op`.
 
 Before classification, the CLI tries to fetch the game's English description from Steam's public store endpoint. It prefers the detailed description and falls back to the short description. This lookup does not need a Steam API key and has a five-second deadline. If the description is missing, Steam is unavailable, or the lookup times out, Jev uses the game name and app ID alone. Descriptions are used for classification but are not saved to the library.
 
-Jev uses the description and its knowledge of the game to predict tags. These are model predictions, not verified Steam metadata. It never guesses personal labels such as `Completed`, `Dropped`, or `Favorites`.
+Jev uses the description and its knowledge of the game to predict tags. These are model predictions, not verified Steam metadata. The default categories do not include personal labels such as `Completed`, `Dropped`, or `Favorites`.
 
 Each successful classification saves immediately and marks the game reviewed, even if no tags meet the threshold. Existing tags are preserved. Run `classify` again to resume after an interruption or failure, or use `classify --all` to include previously reviewed games. Reclassification adds tags but does not remove existing ones. Use `untag` to remove a wrong prediction.
 
 Use `--search` and `--category` to limit classification, for example `classify --category Unplayed`. Games reviewed manually in older versions are skipped unless you use `--all`.
 
 Classification sends game names, app IDs, and available store descriptions to TypeSafe and may incur API charges. Steam IDs, playtime, and existing tags are not sent. The API key is not saved. Each game's classification has a 30-second deadline, including the description lookup and response decoding. Failed Jev requests are not retried automatically to avoid duplicate charges; run the command again to resume.
+
+## Customize classification categories
+
+Create a JSON file such as `my-categories.json`. Map each category name to a description of when it applies:
+
+```json
+{
+	"Cozy farming": "Includes farming and low-pressure play.",
+	"Competitive": "Players compete against each other."
+}
+```
+
+With `TYPESAFE_API_KEY` set, run:
+
+```sh
+node dist/cli.js classify --categories-file my-categories.json
+```
+
+`--categories-file` works with both `classify` and `review`. Paths are relative to your current directory. The file replaces the default classification categories for that run. Omit the flag to use the defaults. The file must contain at least one category. Names and descriptions must be nonempty and have no leading or trailing whitespace. Names cannot contain control characters. Invalid or unreadable files stop the command before any requests or library changes.
+
+Jev evaluates each category independently, so a game can receive several tags or none. The 0.8 probability threshold still applies. Category names and descriptions are sent to TypeSafe. Use criteria that the public description can support, not personal judgments such as whether you finished or liked a game.
+
+To apply new categories to previously reviewed games, add `--all`:
+
+```sh
+node dist/cli.js classify --all --categories-file my-categories.json
+```
+
+Existing tags and playtime groups are preserved. Changing the file does not automatically reclassify games or remove old tags. Use `untag` to remove tags you no longer want.
+
+Library callers can pass the same category map as the second argument to `classifyGame(game, criteria)`. The exported `defaultCategoryCriteria` map can be spread into a custom map to extend or override the defaults.
+
+## Extract categories from Steam collections
+
+Exit Steam, then copy its active collections file from:
+
+```text
+<Steam folder>/userdata/<account-id>/config/cloudstorage/cloud-storage-namespace-1.json
+```
+
+The namespace number can differ. Pass the namespace file containing `user-collections.*` records, not `cloud-storage-namespaces.json`, `localconfig.vdf`, or an old LevelDB file.
+
+Redirect the extracted config to a new file. Never redirect to the Steam source file, your library file, or a config you want to keep. Shell redirection truncates the destination before the command runs, even when extraction fails.
+
+```sh
+node dist/cli.js extract-categories /path/to/cloud-storage-namespace-1.json > my-categories.json
+```
+
+The command runs offline and does not need an API key. Standard output contains only the category config JSON. A reminder to review descriptions goes to standard error. The command does not write to Steam or your local library.
+
+Extraction includes names from both static and dynamic collections. It ignores unrelated records, deleted collections, and records without a value. It trims names, combines identical names, and sorts them. Malformed active records or files with no active collections fail without printing a partial config.
+
+Steam collections supply names, not Jev classification descriptions. Exact matches to the built-in category names reuse their descriptions. Other names receive a description such as `Games matching the category "Cozy farming".` Edit these descriptions to explain your intended criteria, and remove personal categories such as `Favorites` or `Completed` before classification.
+
+With `TYPESAFE_API_KEY` set, use the resulting file:
+
+```sh
+node dist/cli.js classify --all --categories-file my-categories.json
+```
+
+This extracts classification categories only. It does not import existing game memberships or convert dynamic collection filters into classification rules.
 
 ## Sync your Steam library
 

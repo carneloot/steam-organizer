@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
-import { Console, Effect, FileSystem, Layer } from 'effect';
+import { Console, Effect, FileSystem, Layer, Schema } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
 
-import { classifyGame } from './jev.js';
+import { extractCategoryCriteria } from './collections.js';
+import {
+	CategoryCriteria,
+	classifyGame,
+	defaultCategoryCriteria,
+} from './jev.js';
 import {
 	AppError,
 	AppId,
@@ -92,6 +97,31 @@ const importCommand = Command.make(
 ).pipe(
 	Command.withDescription(
 		'Replace the game list from JSON, preserving tags for matching app IDs.',
+	),
+);
+
+const extractCategories = Command.make(
+	'extract-categories',
+	{ input: Argument.String('collections-json') },
+	Effect.fn('CLI.extractCategories')(function* ({ input }) {
+		const fs = yield* FileSystem.FileSystem;
+		const text = yield* fs.readFileString(input).pipe(
+			Effect.mapError(
+				(error) =>
+					new AppError({
+						message: `Cannot read collections ${input}: ${error.reason._tag}`,
+					}),
+			),
+		);
+		const criteria = yield* extractCategoryCriteria(text);
+		yield* Console.log(JSON.stringify(criteria, null, 2));
+		yield* Console.error(
+			`Extracted ${Object.keys(criteria).length} categories. Review the descriptions before classification, especially personal collections. Redirect stdout to a new categories file.`,
+		);
+	}),
+).pipe(
+	Command.withDescription(
+		'Extract Steam collection names as a categories config JSON on stdout. Never modifies Steam or your library.',
 	),
 );
 
@@ -213,13 +243,46 @@ const review = Command.make(
 	'review',
 	{
 		...filters,
+		categoriesFile: Flag.String('categories-file').pipe(
+			Flag.withDefault(''),
+			Flag.withDescription(
+				'JSON map of category names to descriptions; replaces classification defaults',
+			),
+		),
 		all: Flag.Boolean('all').pipe(
 			Flag.withDefault(false),
 			Flag.withDescription('Include games already reviewed'),
 		),
 	},
-	Effect.fn('CLI.review')(function* ({ search, category, all }) {
+	Effect.fn('CLI.review')(function* ({
+		search,
+		category,
+		categoriesFile,
+		all,
+	}) {
 		const { file } = yield* root;
+		let criteria: CategoryCriteria = defaultCategoryCriteria;
+		if (categoriesFile !== '') {
+			const fs = yield* FileSystem.FileSystem;
+			const text = yield* fs.readFileString(categoriesFile).pipe(
+				Effect.mapError(
+					(error) =>
+						new AppError({
+							message: `Cannot read categories ${categoriesFile}: ${error.reason._tag}`,
+						}),
+				),
+			);
+			criteria = yield* Schema.decodeUnknownEffect(
+				CategoryCriteria.pipe(Schema.fromJsonString),
+			)(text).pipe(
+				Effect.mapError(
+					() =>
+						new AppError({
+							message: `Invalid categories file ${categoriesFile}. Expected a nonempty JSON object mapping category names to nonempty, trimmed descriptions. Names must be trimmed and cannot contain control characters.`,
+						}),
+				),
+			);
+		}
 		const store = yield* LibraryStore;
 		const initial = yield* store.load(file);
 		const games = selectGames(initial, search, category, !all);
@@ -227,7 +290,7 @@ const review = Command.make(
 			yield* Console.log(
 				`\n${terminalText(game.name)} (${game.appid}) | ${(game.playtime_forever / 60).toFixed(1)}h | ${categories(game).join(', ')}`,
 			);
-			const tags = yield* classifyGame(game);
+			const tags = yield* classifyGame(game, criteria);
 			yield* store.modify(file, (library) =>
 				updateGame(library, game.appid, (current) => ({
 					...current,
@@ -271,6 +334,7 @@ root.pipe(
 	Command.withSubcommands([
 		sync,
 		importCommand,
+		extractCategories,
 		list,
 		summary,
 		tag,
