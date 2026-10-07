@@ -1,6 +1,9 @@
 import { Runtime } from 'foldkit';
 
-import { Model, init, update, view, subscriptions } from './main.js';
+import { Model } from './model.js';
+import { subscriptions } from './subscriptions.js';
+import { init, update } from './update.js';
+import { view } from './views/view.js';
 import './style.css';
 
 Runtime.run(

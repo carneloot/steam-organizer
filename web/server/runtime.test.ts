@@ -14,7 +14,7 @@ it('native Workflow saves paid results without any browser polling', async () =>
 		external: ['cloudflare:*'],
 	});
 	let calls = 0;
-	const mf = new Miniflare(
+	const runtime = new Miniflare(
 		convertV4MiniflareOptions({
 			modules: true,
 			script: bundled.outputFiles[0]!.text,
@@ -48,20 +48,23 @@ it('native Workflow saves paid results without any browser polling', async () =>
 		}),
 	);
 	try {
-		const db = await mf.getD1Database('DB');
+		const db = await runtime.getD1Database('DB');
 		await db
 			.prepare(await readFile('web/migrations/0001_state.sql', 'utf8'))
 			.run();
 		const post = async (route: string, body: unknown) => {
-			const response = await mf.dispatchFetch(`http://localhost/api/${route}`, {
-				method: 'POST',
-				headers: {
-					origin: 'http://localhost',
-					'content-type': 'application/json',
-					'x-requested-with': 'steam-organizer',
+			const response = await runtime.dispatchFetch(
+				`http://localhost/api/${route}`,
+				{
+					method: 'POST',
+					headers: {
+						origin: 'http://localhost',
+						'content-type': 'application/json',
+						'x-requested-with': 'steam-organizer',
+					},
+					body: JSON.stringify(body),
 				},
-				body: JSON.stringify(body),
-			});
+			);
 			expect(response.status).toBe(200);
 			return response.json();
 		};
@@ -98,11 +101,12 @@ it('native Workflow saves paid results without any browser polling', async () =>
 		expect(document.job.ids).toEqual([400]);
 		expect(document.job.completed).toBe(1);
 		expect(
-			document.library.games.find((g: { appid: number }) => g.appid === 400)
-				.tags,
+			document.library.games.find(
+				(game: { appid: number }) => game.appid === 400,
+			).tags,
 		).toEqual(['Puzzle']);
 		expect(calls).toBe(1);
 	} finally {
-		await mf.dispose();
+		await runtime.dispose();
 	}
 }, 30_000);

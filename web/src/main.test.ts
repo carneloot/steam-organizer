@@ -6,15 +6,13 @@ import type { AppState, Job } from '../shared.js';
 import {
 	Api,
 	DownloadCriteria,
-	initialModel,
-	Message,
 	ParseCollections,
 	ReadFile,
-	subscriptions,
-	update,
-	view,
-	type Model,
-} from './main.js';
+} from './commands.js';
+import { initialModel, Message, type Model } from './model.js';
+import { subscriptions } from './subscriptions.js';
+import { update } from './update.js';
+import { view } from './views/view.js';
 
 const state: AppState = {
 	identity: 'alice@example.com',

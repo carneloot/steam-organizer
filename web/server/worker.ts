@@ -39,12 +39,12 @@ export class ApiCoordinator extends DurableObject<Env> {
 	async fetch(request: Request) {
 		try {
 			const input: LimitInput = await request.json();
-			const result = await this.ctx.storage.transaction(async (tx) => {
-				const s: LimitState = Schema.decodeUnknownSync(LimitStateSchema)(
-					(await tx.get(input.key)) ?? {},
+			const result = await this.ctx.storage.transaction(async (transaction) => {
+				const state: LimitState = Schema.decodeUnknownSync(LimitStateSchema)(
+					(await transaction.get(input.key)) ?? {},
 				);
-				const result = updateLimit(s, input, Date.now());
-				await tx.put(input.key, s);
+				const result = updateLimit(state, input, Date.now());
+				await transaction.put(input.key, state);
 				return result;
 			});
 			return json(result);
@@ -79,17 +79,18 @@ export default {
 			}
 			if (request.method !== 'GET')
 				throw new HttpError(405, 'Method not allowed.');
-			const s =
+			const state =
 				path === '/api/state'
 					? await reconcile(env, identity)
 					: (await Effect.runPromise(new Store(env.DB, identity).load())).state;
-			if (path === '/api/state') return json(stateResponse(s, env, identity));
-			if (path === '/api/backup') return json(s.library);
+			if (path === '/api/state')
+				return json(stateResponse(state, env, identity));
+			if (path === '/api/backup') return json(state.library);
 			if (path === '/api/export') {
 				const format = url.searchParams.get('format');
 				if (format !== 'json' && format !== 'csv')
 					throw new HttpError(400, 'Unknown export format.');
-				return new Response(exportLibrary(s.library, format), {
+				return new Response(exportLibrary(state.library, format), {
 					headers: {
 						'content-type': format === 'csv' ? 'text/csv' : 'application/json',
 						'cache-control': 'no-store',

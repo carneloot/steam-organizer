@@ -19,45 +19,47 @@ import { parseCollections, attachCollections } from './steam-collections.js';
 import { Store, savedCriteria, type Document } from './store.js';
 import { ensureStarted } from './workflow.js';
 
-export const activeJob = (s: Document) =>
-	s.job?.status === 'queued' || s.job?.status === 'running';
+export const activeJob = (state: Document) =>
+	state.job?.status === 'queued' || state.job?.status === 'running';
 const PaidInput = Schema.Struct({
 	appid: AppId,
 	criteria: CategoryCriteria,
 	requestId: Schema.String,
 });
 
-export function unlocked(s: Document) {
-	if (activeJob(s)) throw new HttpError(409, 'A classification job is active.');
-	if (s.operation && s.operation.expiresAt > Date.now())
+export function unlocked(state: Document) {
+	if (activeJob(state))
+		throw new HttpError(409, 'A classification job is active.');
+	if (state.operation && state.operation.expiresAt > Date.now())
 		throw new HttpError(409, 'An operation is active.');
-	if (s.flight)
+	if (state.flight)
 		throw new HttpError(
 			409,
 			'Paid outcome uncertain. Confirm recovery before continuing.',
 		);
-	return s;
+	return state;
 }
-export function recover(s: Document): Document {
-	if (activeJob(s)) throw new HttpError(409, 'A classification job is active.');
-	if (s.operation && s.operation.expiresAt > Date.now())
+export function recover(state: Document): Document {
+	if (activeJob(state))
+		throw new HttpError(409, 'A classification job is active.');
+	if (state.operation && state.operation.expiresAt > Date.now())
 		throw new HttpError(409, 'An operation is active.');
-	if (s.result && s.flight)
-		return applyResult(s, s.flight.requestId, s.flight.appid);
-	return { ...s, operation: null, flight: null, result: null };
+	if (state.result && state.flight)
+		return applyResult(state, state.flight.requestId, state.flight.appid);
+	return { ...state, operation: null, flight: null, result: null };
 }
-export const stateResponse = (s: Document, env: Env, identity: string) => ({
-	library: s.library,
+export const stateResponse = (state: Document, env: Env, identity: string) => ({
+	library: state.library,
 	identity,
-	criteria: savedCriteria(s),
-	job: s.job
+	criteria: savedCriteria(state),
+	job: state.job
 		? {
-				id: s.job.id,
-				status: s.job.status,
-				total: s.job.total,
-				completed: s.job.completed,
-				current: s.job.current,
-				error: s.job.error,
+				id: state.job.id,
+				status: state.job.status,
+				total: state.job.total,
+				completed: state.job.completed,
+				current: state.job.current,
+				error: state.job.error,
 			}
 		: null,
 	configured: { sync: !!env.STEAM_API_KEY, classify: !!env.TYPESAFE_API_KEY },
@@ -76,35 +78,35 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 	store: Pick<Store, 'load' | 'modify'>,
 	input: typeof PaidInput.Type,
 ) {
-	let s = (yield* store.load()).state;
-	if (s.completed?.requestId === input.requestId) {
-		if (s.completed.appid !== input.appid)
+	let state = (yield* store.load()).state;
+	if (state.completed?.requestId === input.requestId) {
+		if (state.completed.appid !== input.appid)
 			return yield* Effect.fail(
 				new HttpError(409, 'Request ID reused for a different game.'),
 			);
-		return s;
+		return state;
 	}
 	if (
-		s.flight?.requestId === input.requestId &&
-		s.result?.requestId === input.requestId &&
-		s.flight.appid === input.appid
+		state.flight?.requestId === input.requestId &&
+		state.result?.requestId === input.requestId &&
+		state.flight.appid === input.appid
 	)
 		return yield* store.modify((current) =>
 			applyResult(current, input.requestId, input.appid),
 		);
-	const game = s.library.games.find((g) => g.appid === input.appid);
+	const game = state.library.games.find((game) => game.appid === input.appid);
 	if (!game) return yield* Effect.fail(new HttpError(404, 'Game missing.'));
 	const description = yield* (yield* Steam).fetchGameDescription(input.appid);
 	const operationId = crypto.randomUUID();
-	s = yield* store.modify((current) => {
+	state = yield* store.modify((current) => {
 		if (current.completed?.requestId === input.requestId) {
 			if (current.completed.appid !== input.appid)
 				throw new HttpError(409, 'Request ID reused for a different game.');
 			return current;
 		}
 		if (
-			s.job &&
-			(current.job?.id !== s.job.id ||
+			state.job &&
+			(current.job?.id !== state.job.id ||
 				!activeJob(current) ||
 				input.requestId !== `${current.job.id}:${current.job.completed}` ||
 				current.job.ids[current.job.completed] !== input.appid)
@@ -117,9 +119,11 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 			throw new HttpError(409, 'A classification job is active.');
 		unlocked({ ...current, job: null });
 		if (
-			current.library.steamId !== s.library.steamId ||
+			current.library.steamId !== state.library.steamId ||
 			!current.library.games.some(
-				(g) => g.appid === input.appid && g.name === game.name,
+				(candidateGame) =>
+					candidateGame.appid === input.appid &&
+					candidateGame.name === game.name,
 			)
 		)
 			throw new HttpError(409, 'Library changed. Try again.');
@@ -129,7 +133,7 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 			operation: { id: operationId, expiresAt: Date.now() + 120_000 },
 		};
 	});
-	if (s.completed?.requestId === input.requestId) return s;
+	if (state.completed?.requestId === input.requestId) return state;
 	const paid = Effect.gen(function* () {
 		const tags = yield* (yield* Classifier).classifyGame(
 			{ ...game, description },
@@ -202,10 +206,14 @@ export function applyResult(
 			: {}),
 		library: {
 			...current.library,
-			games: current.library.games.map((g) =>
-				g.appid === appid
-					? { ...g, tags: [...new Set([...g.tags, ...tags])], reviewed: true }
-					: g,
+			games: current.library.games.map((game) =>
+				game.appid === appid
+					? {
+							...game,
+							tags: [...new Set([...game.tags, ...tags])],
+							reviewed: true,
+						}
+					: game,
 			),
 		},
 	};
@@ -217,12 +225,14 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 	identity: string,
 ) {
 	const store = new Store(env.DB, identity);
-	const respond = (s: Document) => stateResponse(s, env, identity);
+	const respond = (state: Document) => stateResponse(state, env, identity);
 	if (path === '/api/jobs/cancel') {
 		yield* decode(Schema.Struct({}), body);
 		return respond(
-			yield* store.modify((s) =>
-				activeJob(s) ? { ...s, job: { ...s.job!, cancel: true } } : s,
+			yield* store.modify((state) =>
+				activeJob(state)
+					? { ...state, job: { ...state.job!, cancel: true } }
+					: state,
 			),
 		);
 	}
@@ -235,17 +245,17 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 			body,
 		);
 		return respond(
-			yield* store.modify((s) => {
-				unlocked(s);
-				if (s.library.steamId !== input.steamId)
+			yield* store.modify((state) => {
+				unlocked(state);
+				if (state.library.steamId !== input.steamId)
 					throw new HttpError(
 						409,
 						'Steam account changed. Reload before saving categories.',
 					);
 				return {
-					...s,
+					...state,
 					criteriaBySteamId: {
-						...s.criteriaBySteamId,
+						...state.criteriaBySteamId,
 						[input.steamId ?? 'offline']: input.criteria,
 					},
 				};
@@ -255,12 +265,12 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 	if (path === '/api/tags') {
 		const input = yield* decode(TagsInput, body);
 		return respond(
-			yield* store.modify((s) => ({
-				...s,
+			yield* store.modify((state) => ({
+				...state,
 				library: {
-					...s.library,
-					games: s.library.games.map((g) =>
-						g.appid === input.appid ? { ...g, tags: input.tags } : g,
+					...state.library,
+					games: state.library.games.map((game) =>
+						game.appid === input.appid ? { ...game, tags: input.tags } : game,
 					),
 				},
 			})),
@@ -277,25 +287,25 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 				new HttpError(400, 'Classification is not configured.'),
 			);
 		const id = crypto.randomUUID();
-		const claimed = yield* store.modify((s) => {
-			unlocked(s);
-			if (input.steamId !== s.library.steamId)
+		const claimed = yield* store.modify((state) => {
+			unlocked(state);
+			if (input.steamId !== state.library.steamId)
 				throw new HttpError(409, 'Steam account changed.');
 			const ids = selectGames(
-				s.library,
+				state.library,
 				input.search,
 				input.category,
 				!input.all,
-			).map((g) => g.appid);
+			).map((game) => game.appid);
 			if (ids.length > 500)
 				throw new HttpError(400, 'Select at most 500 games per job.');
 			return {
-				...s,
+				...state,
 				job: {
 					id,
 					ids,
-					criteria: savedCriteria(s),
-					steamId: s.library.steamId,
+					criteria: savedCriteria(state),
+					steamId: state.library.steamId,
 					cancel: false,
 					status: 'queued',
 					total: ids.length,
@@ -311,18 +321,18 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 			).pipe(
 				Effect.as(claimed),
 				Effect.catch(() =>
-					store.modify((s) =>
-						s.job?.id === id && activeJob(s)
+					store.modify((state) =>
+						state.job?.id === id && activeJob(state)
 							? {
-									...s,
+									...state,
 									job: {
-										...s.job,
+										...state.job,
 										status: 'failed',
 										current: null,
 										error: 'Classification could not start. Try a new job.',
 									},
 								}
-							: s,
+							: state,
 					),
 				),
 			),
@@ -335,17 +345,17 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 			catch: () => new HttpError(400, 'Invalid Steam collections file.'),
 		});
 		return respond(
-			yield* store.modify((s) => ({
-				...unlocked(s),
-				library: attachCollections(s.library, collections),
+			yield* store.modify((state) => ({
+				...unlocked(state),
+				library: attachCollections(state.library, collections),
 			})),
 		);
 	}
 	if (path !== '/api/import' && path !== '/api/restore' && path !== '/api/sync')
 		return yield* Effect.fail(new HttpError(404, 'Unknown API route.'));
 	const operationId = crypto.randomUUID();
-	const snapshot = yield* store.modify((s) => ({
-		...unlocked(s),
+	const snapshot = yield* store.modify((state) => ({
+		...unlocked(state),
 		operation: { id: operationId, expiresAt: Date.now() + 120_000 },
 	}));
 	return yield* Effect.gen(function* () {
@@ -378,17 +388,19 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 			);
 		}
 		return respond(
-			yield* store.modify((s) => {
-				if (s.flight || s.operation?.id !== operationId)
+			yield* store.modify((state) => {
+				if (state.flight || state.operation?.id !== operationId)
 					throw new HttpError(409, 'Library changed. Try again.');
-				return { ...s, library: imported, operation: null };
+				return { ...state, library: imported, operation: null };
 			}),
 		);
 	}).pipe(
 		Effect.ensuring(
 			store
-				.modify((s) =>
-					s.operation?.id === operationId ? { ...s, operation: null } : s,
+				.modify((state) =>
+					state.operation?.id === operationId
+						? { ...state, operation: null }
+						: state,
 				)
 				.pipe(Effect.orDie),
 		),

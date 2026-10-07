@@ -16,7 +16,7 @@ const step: CheckpointStep = {
 	},
 };
 function fixture() {
-	let s: Document = {
+	let state: Document = {
 		...initial(),
 		library: {
 			version: 1,
@@ -43,87 +43,99 @@ function fixture() {
 		},
 	};
 	let calls = 0;
-	const io: WorkflowServices = {
-		load: async () => s,
-		modify: async (f) => {
-			s = f(s);
-			return s;
+	const operations: WorkflowServices = {
+		load: async () => state,
+		modify: async (update) => {
+			state = update(state);
+			return state;
 		},
 		classify: async (input) => {
 			calls++;
-			s = applyResult(
-				{ ...s, flight: input, result: { ...input, tags: ['Action'] } },
+			state = applyResult(
+				{ ...state, flight: input, result: { ...input, tags: ['Action'] } },
 				input.requestId,
 				input.appid,
 			);
 		},
 	};
 	return {
-		io,
-		get: () => s,
+		operations,
+		get: () => state,
 		calls: () => calls,
 		set: (next: Document) => {
-			s = next;
+			state = next;
 		},
 	};
 }
 it('replays without a journal using atomic persisted index, preserving tag edits', async () => {
-	const f = fixture();
-	const classify = f.io.classify;
-	f.io.classify = async (input) => {
+	const testFixture = fixture();
+	const classify = testFixture.operations.classify;
+	testFixture.operations.classify = async (input) => {
 		await classify(input);
 		if (input.appid === 1) throw new Error('journal lost');
 	};
-	await expect(runClassification(step, 'job', f.io)).rejects.toThrow(
-		'journal lost',
-	);
-	expect(f.get().job?.completed).toBe(1);
-	f.set({
-		...f.get(),
-		job: { ...f.get().job!, status: 'running' },
+	await expect(
+		runClassification(step, 'job', testFixture.operations),
+	).rejects.toThrow('journal lost');
+	expect(testFixture.get().job?.completed).toBe(1);
+	testFixture.set({
+		...testFixture.get(),
+		job: { ...testFixture.get().job!, status: 'running' },
 		library: {
-			...f.get().library,
-			games: f
-				.get()
-				.library.games.map((g) => ({ ...g, tags: [...g.tags, 'Edited'] })),
+			...testFixture.get().library,
+			games: testFixture.get().library.games.map((game) => ({
+				...game,
+				tags: [...game.tags, 'Edited'],
+			})),
 		},
 	});
-	f.io.classify = classify;
-	await runClassification(step, 'job', f.io);
-	expect(f.calls()).toBe(2);
-	expect(f.get().job?.status).toBe('complete');
-	expect(f.get().library.games[1]?.tags).toEqual(['Edited', 'Action']);
+	testFixture.operations.classify = classify;
+	await runClassification(step, 'job', testFixture.operations);
+	expect(testFixture.calls()).toBe(2);
+	expect(testFixture.get().job?.status).toBe('complete');
+	expect(testFixture.get().library.games[1]?.tags).toEqual([
+		'Edited',
+		'Action',
+	]);
 });
 it('cancels at next boundary after saving the in-flight game', async () => {
-	const f = fixture();
-	const classify = f.io.classify;
-	f.io.classify = async (input) => {
-		f.set({ ...f.get(), job: { ...f.get().job!, cancel: true } });
+	const testFixture = fixture();
+	const classify = testFixture.operations.classify;
+	testFixture.operations.classify = async (input) => {
+		testFixture.set({
+			...testFixture.get(),
+			job: { ...testFixture.get().job!, cancel: true },
+		});
 		await classify(input);
 	};
-	await runClassification(step, 'job', f.io);
-	expect(f.calls()).toBe(1);
-	expect(f.get().job?.status).toBe('cancelled');
-	expect(f.get().job?.completed).toBe(1);
+	await runClassification(step, 'job', testFixture.operations);
+	expect(testFixture.calls()).toBe(1);
+	expect(testFixture.get().job?.status).toBe('cancelled');
+	expect(testFixture.get().job?.completed).toBe(1);
 });
 it('failed step preserves uncertain flight and requires consent recovery', async () => {
-	const f = fixture();
-	f.io.classify = async (input) => {
-		f.set({ ...f.get(), flight: input });
+	const testFixture = fixture();
+	testFixture.operations.classify = async (input) => {
+		testFixture.set({ ...testFixture.get(), flight: input });
 		throw new Error('provider lost');
 	};
-	await expect(runClassification(step, 'job', f.io)).rejects.toThrow();
-	expect(f.get().job?.status).toBe('failed');
-	expect(() => unlocked(f.get())).toThrow('uncertain');
-	expect(recover(f.get()).flight).toBe(null);
+	await expect(
+		runClassification(step, 'job', testFixture.operations),
+	).rejects.toThrow();
+	expect(testFixture.get().job?.status).toBe('failed');
+	expect(() => unlocked(testFixture.get())).toThrow('uncertain');
+	expect(recover(testFixture.get()).flight).toBe(null);
 });
 it('active job blocks recovery and mutation, terminal delayed workflow cannot charge', async () => {
-	const f = fixture();
-	expect(() => unlocked(f.get())).toThrow('active');
-	expect(() => recover(f.get())).toThrow('active');
-	f.set({ ...f.get(), job: { ...f.get().job!, status: 'failed' } });
-	await runClassification(step, 'job', f.io);
-	expect(f.calls()).toBe(0);
+	const testFixture = fixture();
+	expect(() => unlocked(testFixture.get())).toThrow('active');
+	expect(() => recover(testFixture.get())).toThrow('active');
+	testFixture.set({
+		...testFixture.get(),
+		job: { ...testFixture.get().job!, status: 'failed' },
+	});
+	await runClassification(step, 'job', testFixture.operations);
+	expect(testFixture.calls()).toBe(0);
 });
 it('creation failure checks deterministic instance before propagating, accepting lost responses', async () => {
 	const ids: string[] = [];

@@ -36,50 +36,57 @@ const Adaptive = Schema.Struct({
 	phase: Schema.Literals(['inactive', 'cooldown', 'learned']),
 });
 export function updateLimit(
-	s: LimitState,
-	o: LimitInput,
+	state: LimitState,
+	input: LimitInput,
 	now: number,
 ): unknown {
-	if (o.method === 'fixedWindow') {
-		const c =
-			!s.fixed || s.fixed.expiresAt <= now
+	if (input.method === 'fixedWindow') {
+		const window =
+			!state.fixed || state.fixed.expiresAt <= now
 				? { count: 0, expiresAt: now }
-				: { ...s.fixed };
-		const count = c.count + (o.tokens ?? 1);
-		if (o.limit !== undefined && count > o.limit)
-			return [count, c.expiresAt - now];
-		c.count = count;
-		c.expiresAt += (o.refillRate ?? 0) * (o.tokens ?? 1);
-		s.fixed = c;
-		return [count, c.expiresAt - now];
+				: { ...state.fixed };
+		const count = window.count + (input.tokens ?? 1);
+		if (input.limit !== undefined && count > input.limit)
+			return [count, window.expiresAt - now];
+		window.count = count;
+		window.expiresAt += (input.refillRate ?? 0) * (input.tokens ?? 1);
+		state.fixed = window;
+		return [count, window.expiresAt - now];
 	}
-	if (o.method === 'tokenBucket') {
-		const limit = o.limit ?? 1,
-			refill = o.refillRate ?? 1;
-		const b = s.bucket ? { ...s.bucket } : { tokens: limit, lastRefill: now };
-		const added = Math.floor((now - b.lastRefill) / refill);
+	if (input.method === 'tokenBucket') {
+		const limit = input.limit ?? 1,
+			refill = input.refillRate ?? 1;
+		const bucket = state.bucket
+			? { ...state.bucket }
+			: { tokens: limit, lastRefill: now };
+		const added = Math.floor((now - bucket.lastRefill) / refill);
 		if (added > 0) {
-			b.tokens = Math.min(limit, b.tokens + added);
-			b.lastRefill += added * refill;
+			bucket.tokens = Math.min(limit, bucket.tokens + added);
+			bucket.lastRefill += added * refill;
 		}
-		if (b.tokens >= limit) b.lastRefill = now;
-		const remaining = b.tokens - (o.tokens ?? 1);
-		if (o.allowOverflow || remaining >= 0) b.tokens = remaining;
-		s.bucket = b;
-		return [remaining, Math.max(0, now - b.lastRefill)];
+		if (bucket.tokens >= limit) bucket.lastRefill = now;
+		const remaining = bucket.tokens - (input.tokens ?? 1);
+		if (input.allowOverflow || remaining >= 0) bucket.tokens = remaining;
+		state.bucket = bucket;
+		return [remaining, Math.max(0, now - bucket.lastRefill)];
 	}
-	if (o.method === 'adaptiveFeedback') {
-		if (o.status === 429 && o.retryAfter !== undefined)
-			s.cooldownUntil = Math.max(s.cooldownUntil ?? 0, now + o.retryAfter);
+	if (input.method === 'adaptiveFeedback') {
+		if (input.status === 429 && input.retryAfter !== undefined)
+			state.cooldownUntil = Math.max(
+				state.cooldownUntil ?? 0,
+				now + input.retryAfter,
+			);
 		return null;
 	}
-	if (s.cooldownUntil === undefined)
+	if (state.cooldownUntil === undefined)
 		return { delay: 0, epoch: 0, phase: 'inactive' };
-	if (s.cooldownUntil > now)
-		return { delay: s.cooldownUntil - now, epoch: 0, phase: 'cooldown' };
-	const next = Math.max(now, s.adaptiveNext ?? 0);
-	s.adaptiveNext =
-		next + ((o.fallbackWindow ?? 0) * (o.tokens ?? 1)) / (o.fallbackLimit ?? 1);
+	if (state.cooldownUntil > now)
+		return { delay: state.cooldownUntil - now, epoch: 0, phase: 'cooldown' };
+	const next = Math.max(now, state.adaptiveNext ?? 0);
+	state.adaptiveNext =
+		next +
+		((input.fallbackWindow ?? 0) * (input.tokens ?? 1)) /
+			(input.fallbackLimit ?? 1);
 	return { delay: next - now, epoch: 0, phase: 'learned' };
 }
 export function limiterLayer(namespace: DurableObjectNamespace) {
@@ -107,42 +114,47 @@ export function limiterLayer(namespace: DurableObjectNamespace) {
 	const store = Layer.succeed(
 		RateLimiter.RateLimiterStore,
 		RateLimiter.RateLimiterStore.of({
-			fixedWindow: (o) =>
+			fixedWindow: (options) =>
 				call(
 					{
-						...o,
+						...options,
 						method: 'fixedWindow',
-						refillRate: Duration.toMillis(o.refillRate),
+						refillRate: Duration.toMillis(options.refillRate),
 					},
 					Pair,
 				),
-			tokenBucket: (o) =>
+			tokenBucket: (options) =>
 				call(
 					{
-						...o,
+						...options,
 						method: 'tokenBucket',
-						refillRate: Duration.toMillis(o.refillRate),
+						refillRate: Duration.toMillis(options.refillRate),
 					},
 					Pair,
 				),
-			adaptiveConsume: (o) =>
+			adaptiveConsume: (options) =>
 				call(
 					{
-						...o,
+						...options,
 						method: 'adaptiveConsume',
-						fallbackWindow: Duration.toMillis(o.fallbackWindow),
+						fallbackWindow: Duration.toMillis(options.fallbackWindow),
 					},
 					Adaptive,
-				).pipe(Effect.map((r) => ({ ...r, delay: Duration.millis(r.delay) }))),
-			adaptiveFeedback: (o) =>
+				).pipe(
+					Effect.map((result) => ({
+						...result,
+						delay: Duration.millis(result.delay),
+					})),
+				),
+			adaptiveFeedback: (options) =>
 				call(
 					{
 						method: 'adaptiveFeedback',
-						key: o.key,
-						status: o.status,
-						...(o.retryAfter === undefined
+						key: options.key,
+						status: options.status,
+						...(options.retryAfter === undefined
 							? {}
-							: { retryAfter: Duration.toMillis(o.retryAfter) }),
+							: { retryAfter: Duration.toMillis(options.retryAfter) }),
 					},
 					Schema.Null,
 				).pipe(Effect.asVoid),

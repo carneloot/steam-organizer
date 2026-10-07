@@ -24,7 +24,7 @@ export default Alchemy.Stack(
 		const classifierKey = yield* Config.Redacted('TYPESAFE_API_KEY').pipe(
 			Config.withDefault(null),
 		);
-		const db = yield* Cloudflare.D1.Database('Library', {
+		const database = yield* Cloudflare.D1.Database('Library', {
 			migrations: './web/migrations',
 		});
 		const coordinator = Cloudflare.DurableObject('Coordinator', {
@@ -54,7 +54,7 @@ export default Alchemy.Stack(
 				],
 			},
 			env: {
-				DB: db,
+				DB: database,
 				COORDINATOR: coordinator,
 				CLASSIFICATION: workflow,
 				...(steamKey ? { STEAM_API_KEY: steamKey } : {}),

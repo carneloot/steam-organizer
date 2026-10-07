@@ -16,8 +16,8 @@ it('reconciles queued claim-before-create and native termination, releasing fail
 	const store = new Store(db, 'a@test');
 	const claim = () =>
 		Effect.runPromise(
-			store.modify((s) => ({
-				...s,
+			store.modify((state) => ({
+				...state,
 				job: {
 					id: 'deterministic',
 					status: 'queued',
@@ -95,8 +95,8 @@ it.effect(
 				CLASSIFICATION: binding,
 			} as unknown as Env;
 			const store = new Store(db, 'owner');
-			yield* store.modify((s) => ({
-				...s,
+			yield* store.modify((state) => ({
+				...state,
 				criteriaBySteamId: { offline: { Mine: 'saved' } },
 				library: {
 					...library,
@@ -135,9 +135,9 @@ it.effect(
 			});
 			expect(Exit.isFailure(yield* Effect.exit(run()))).toBe(true);
 			expect((yield* run('another')).job?.status).toBe('queued');
-			yield* store.modify((s) => ({
-				...s,
-				job: { ...s.job!, status: 'cancelled' },
+			yield* store.modify((state) => ({
+				...state,
+				job: { ...state.job!, status: 'cancelled' },
 			}));
 			binding.create = async () => {
 				throw new Error('unavailable');
@@ -153,8 +153,8 @@ it.effect(
 		Effect.gen(function* () {
 			const db = fakeDb();
 			const env = { DB: db } as Env;
-			const a = new Store(db, 'a@test'),
-				b = new Store(db, 'b@test');
+			const ownerStore = new Store(db, 'a@test'),
+				otherOwnerStore = new Store(db, 'b@test');
 			const first = '76561198000000001',
 				second = '76561198000000002';
 			const layer = Layer.mergeAll(
@@ -167,12 +167,12 @@ it.effect(
 			);
 			const run = (path: string, body: unknown, owner = 'a@test') =>
 				mutate(path, body, env, owner).pipe(Effect.provide(layer));
-			yield* a.modify((s) => ({
-				...s,
+			yield* ownerStore.modify((state) => ({
+				...state,
 				library: { ...library, steamId: first },
 			}));
-			yield* b.modify((s) => ({
-				...s,
+			yield* otherOwnerStore.modify((state) => ({
+				...state,
 				library: { ...library, steamId: first },
 			}));
 			yield* run('/api/criteria', {
@@ -200,12 +200,14 @@ it.effect(
 				criteria: { Second: 'second' },
 			});
 			yield* run('/api/sync', { steamId: first, confirm: true });
-			expect(savedCriteria((yield* a.load()).state)).toEqual({ Mine: 'first' });
-			expect(savedCriteria((yield* b.load()).state)).toEqual({
+			expect(savedCriteria((yield* ownerStore.load()).state)).toEqual({
+				Mine: 'first',
+			});
+			expect(savedCriteria((yield* otherOwnerStore.load()).state)).toEqual({
 				Other: 'private',
 			});
-			yield* a.modify((s) => ({
-				...s,
+			yield* ownerStore.modify((state) => ({
+				...state,
 				job: {
 					id: 'job',
 					status: 'running',
@@ -215,7 +217,7 @@ it.effect(
 					error: null,
 					steamId: first,
 					ids: [1],
-					criteria: savedCriteria(s),
+					criteria: savedCriteria(state),
 					cancel: false,
 				},
 			}));
@@ -239,7 +241,7 @@ it.effect(
 					),
 				).toBe(true);
 			yield* run('/api/tags', { appid: 1, tags: ['Edited'] });
-			expect((yield* a.load()).state.library.games[0]?.tags).toEqual([
+			expect((yield* ownerStore.load()).state.library.games[0]?.tags).toEqual([
 				'Edited',
 			]);
 			yield* run(
@@ -248,28 +250,30 @@ it.effect(
 				'b@test',
 			);
 			yield* run('/api/jobs/cancel', {});
-			expect((yield* a.load()).state.job?.cancel).toBe(true);
+			expect((yield* ownerStore.load()).state.job?.cancel).toBe(true);
 		}),
 );
 function fixture() {
 	let state: Document = { ...initial(), library };
 	const store: Pick<Store, 'load' | 'modify'> = {
 		load: () => Effect.succeed({ state, revision: 0 }),
-		modify: (f) =>
+		modify: (update) =>
 			Effect.try({
 				try: () => {
-					state = f(state);
+					state = update(state);
 					return state;
 				},
-				catch: (e) =>
-					e instanceof HttpError ? e : new HttpError(500, 'save failed'),
+				catch: (error) =>
+					error instanceof HttpError
+						? error
+						: new HttpError(500, 'save failed'),
 			}),
 	};
 	return {
 		store,
 		get: () => state,
-		set: (s: Document) => {
-			state = s;
+		set: (document: Document) => {
+			state = document;
 		},
 	};
 }
@@ -315,7 +319,7 @@ it.effect(
 	'concurrent same request charges once, preserves edits, and replays completed state',
 	() =>
 		Effect.gen(function* () {
-			const f = fixture();
+			const testFixture = fixture();
 			const entered = yield* Deferred.make<void>();
 			const release = yield* Deferred.make<void>();
 			let calls = 0;
@@ -331,31 +335,34 @@ it.effect(
 						}),
 				}),
 			);
-			const run = classifyOne(f.store, input).pipe(
+			const run = classifyOne(testFixture.store, input).pipe(
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			const first = yield* run.pipe(Effect.forkScoped);
 			yield* Deferred.await(entered);
-			expect(() => recover(f.get())).toThrow('active');
-			expect(() => unlocked(f.get())).toThrow('active');
+			expect(() => recover(testFixture.get())).toThrow('active');
+			expect(() => unlocked(testFixture.get())).toThrow('active');
 			expect(Exit.isFailure(yield* Effect.exit(run))).toBe(true);
-			f.set({
-				...f.get(),
+			testFixture.set({
+				...testFixture.get(),
 				library: { ...library, games: [{ ...game, tags: ['Edited'] }] },
 			});
 			yield* Deferred.succeed(release, undefined);
 			yield* Fiber.join(first);
 			yield* run;
 			expect(calls).toBe(1);
-			expect(f.get().library.games[0]?.tags).toEqual(['Edited', 'Action']);
-			expect(JSON.stringify(f.get())).not.toContain('action games');
+			expect(testFixture.get().library.games[0]?.tags).toEqual([
+				'Edited',
+				'Action',
+			]);
+			expect(JSON.stringify(testFixture.get())).not.toContain('action games');
 		}),
 );
 it.effect(
 	'unknown paid outcome blocks retries/import and supports consent recovery',
 	() =>
 		Effect.gen(function* () {
-			const f = fixture();
+			const testFixture = fixture();
 			let calls = 0;
 			const classifier = Layer.succeed(
 				Classifier,
@@ -367,22 +374,22 @@ it.effect(
 						}),
 				}),
 			);
-			const run = classifyOne(f.store, input).pipe(
+			const run = classifyOne(testFixture.store, input).pipe(
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			expect(Exit.isFailure(yield* Effect.exit(run))).toBe(true);
-			expect(f.get().flight?.requestId).toBe('request');
+			expect(testFixture.get().flight?.requestId).toBe('request');
 			expect(Exit.isFailure(yield* Effect.exit(run))).toBe(true);
 			expect(calls).toBe(1);
-			expect(() => unlocked(f.get())).toThrow('uncertain');
-			expect(recover(f.get()).flight).toBe(null);
+			expect(() => unlocked(testFixture.get())).toThrow('uncertain');
+			expect(recover(testFixture.get()).flight).toBe(null);
 		}),
 );
 it.effect('saved paid result applies without provider call', () =>
 	Effect.gen(function* () {
-		const f = fixture();
-		f.set({
-			...f.get(),
+		const testFixture = fixture();
+		testFixture.set({
+			...testFixture.get(),
 			flight: { requestId: 'request', appid: 1 },
 			result: { requestId: 'request', appid: 1, tags: ['RPG'] },
 		});
@@ -390,10 +397,10 @@ it.effect('saved paid result applies without provider call', () =>
 			Classifier,
 			Classifier.of({ classifyGame: () => Effect.die('must not charge') }),
 		);
-		yield* classifyOne(f.store, input).pipe(
+		yield* classifyOne(testFixture.store, input).pipe(
 			Effect.provide(Layer.merge(steamLayer, classifier)),
 		);
-		expect(f.get().library.games[0]?.tags).toEqual(['Custom', 'RPG']);
+		expect(testFixture.get().library.games[0]?.tags).toEqual(['Custom', 'RPG']);
 	}),
 );
 it.effect(
@@ -418,12 +425,12 @@ it.effect(
 					),
 				),
 			);
-			const a = (yield* new Store(db, 'a@test').load()).state;
-			const b = (yield* new Store(db, 'b@test').load()).state;
-			expect(a.library.games[0]).toEqual({ ...game, reviewed: true });
-			expect(b.library.games).toEqual([]);
-			yield* new Store(db, 'b@test').modify((s) => ({
-				...s,
+			const ownerState = (yield* new Store(db, 'a@test').load()).state;
+			const otherOwnerState = (yield* new Store(db, 'b@test').load()).state;
+			expect(ownerState.library.games[0]).toEqual({ ...game, reviewed: true });
+			expect(otherOwnerState.library.games).toEqual([]);
+			yield* new Store(db, 'b@test').modify((state) => ({
+				...state,
 				flight: { requestId: 'b', appid: 2 },
 			}));
 			expect((yield* new Store(db, 'a@test').load()).state.flight).toBe(null);
@@ -508,16 +515,16 @@ it.effect(
 	'a failed apply retains the paid checkpoint and retries without charging',
 	() =>
 		Effect.gen(function* () {
-			const f = fixture();
+			const testFixture = fixture();
 			let writes = 0,
 				calls = 0;
 			const store: Pick<Store, 'load' | 'modify'> = {
-				load: f.store.load,
+				load: testFixture.store.load,
 				modify: (update) =>
 					Effect.suspend(() =>
 						++writes === 3
 							? Effect.fail(new HttpError(503, 'save failed'))
-							: f.store.modify(update),
+							: testFixture.store.modify(update),
 					),
 			};
 			const classifier = Layer.succeed(
@@ -534,10 +541,10 @@ it.effect(
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			expect(Exit.isFailure(yield* Effect.exit(run))).toBe(true);
-			expect(f.get().result?.tags).toEqual(['Action']);
+			expect(testFixture.get().result?.tags).toEqual(['Action']);
 			yield* run;
 			expect(calls).toBe(1);
-			expect(f.get().completed?.requestId).toBe(input.requestId);
+			expect(testFixture.get().completed?.requestId).toBe(input.requestId);
 		}),
 );
 it.effect('D1 CAS admits one concurrent paid claim per owner', () =>
@@ -546,8 +553,8 @@ it.effect('D1 CAS admits one concurrent paid claim per owner', () =>
 		const store = new Store(db, 'a@test');
 		const claim = (requestId: string) =>
 			Effect.exit(
-				store.modify((s) => ({
-					...unlocked(s),
+				store.modify((state) => ({
+					...unlocked(state),
 					flight: { requestId, appid: 1 },
 				})),
 			);
@@ -575,8 +582,8 @@ it.effect(
 			);
 			const run = (path: string, body: unknown) =>
 				mutate(path, body, env, 'a@test').pipe(Effect.provide(layer));
-			yield* store.modify((s) => ({
-				...s,
+			yield* store.modify((state) => ({
+				...state,
 				library: { ...library, steamId: '76561198000000001' },
 			}));
 			expect(
@@ -588,8 +595,8 @@ it.effect(
 			).toBe(true);
 			yield* run('/api/sync', { steamId: '76561198000000002', confirm: true });
 			expect((yield* store.load()).state.library.games[0]?.tags).toEqual([]);
-			yield* store.modify((s) => ({
-				...s,
+			yield* store.modify((state) => ({
+				...state,
 				flight: { requestId: 'paid', appid: 1 },
 				operation: { id: 'lease', expiresAt: Date.now() + 120000 },
 			}));
@@ -605,7 +612,7 @@ it.effect(
 						),
 					),
 				).toBe(true);
-			yield* store.modify((s) => ({ ...s, operation: null }));
+			yield* store.modify((state) => ({ ...state, operation: null }));
 			expect(
 				Exit.isFailure(
 					yield* Effect.exit(run('/api/import', { text: '[]', confirm: true })),

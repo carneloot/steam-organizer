@@ -55,8 +55,8 @@ export function attachCollections(
 				...new Set([
 					...game.tags,
 					...memberships
-						.filter((m) => m.appids.includes(game.appid))
-						.map((m) => m.name),
+						.filter((membership) => membership.appids.includes(game.appid))
+						.map((membership) => membership.name),
 				]),
 			],
 		})),
