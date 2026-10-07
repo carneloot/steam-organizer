@@ -2,9 +2,9 @@ import { NodeServices } from '@effect/platform-node';
 import { assert, describe, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, FileSystem, Layer } from 'effect';
 
-import { AppError, emptyLibrary, mergeLibrary } from '../domain/library.js';
+import { emptyLibrary, mergeLibrary } from '../domain/library.js';
 import { LibraryStore } from '../services/library-store.js';
-import { LibraryService } from '../services/library.js';
+import { LibraryService, GameNotFoundError } from '../services/library.js';
 import { FileLibraryStoreLayer } from './library-store.js';
 import { LibraryLayer } from './library.js';
 
@@ -59,6 +59,7 @@ describe('LibraryStore', () => {
 					.modify(file, () => Effect.succeed(seed))
 					.pipe(Effect.flip);
 				assert.include(result.message, 'Invalid library file');
+				assert.strictEqual(result._tag, 'InvalidLibraryError');
 				assert.strictEqual(yield* fs.readFileString(file), 'not json');
 				assert.isFalse(yield* fs.exists(`${file}.lock`));
 			}).pipe(Effect.provide(layer)),
@@ -87,6 +88,7 @@ describe('LibraryStore', () => {
 				.modify(file, () => Effect.succeed(emptyLibrary()))
 				.pipe(Effect.flip);
 			assert.include(error.message, 'Library is locked');
+			assert.strictEqual(error._tag, 'LibraryLockedError');
 			yield* Deferred.succeed(finish, undefined);
 			yield* Fiber.join(writer);
 			assert.deepStrictEqual(yield* store.load(file), seed);
@@ -100,11 +102,37 @@ describe('LibraryStore', () => {
 			const file = `${directory}/library.json`;
 			const store = yield* LibraryStore;
 			yield* store.modify(file, () => Effect.succeed(seed));
-			yield* store
-				.modify(file, () => Effect.fail(new AppError({ message: 'No update' })))
+			const error = yield* store
+				.modify(file, () =>
+					Effect.fail(new GameNotFoundError({ message: 'No update' })),
+				)
 				.pipe(Effect.flip);
+			assert.strictEqual(error._tag, 'GameNotFoundError');
+			const platformError = yield* store
+				.modify(file, () =>
+					fs.readFileString(`${directory}/missing`).pipe(Effect.as(seed)),
+				)
+				.pipe(Effect.flip);
+			assert.strictEqual(platformError._tag, 'PlatformError');
 			assert.deepStrictEqual(yield* store.load(file), seed);
 			assert.isFalse(yield* fs.exists(`${file}.lock`));
+		}).pipe(Effect.provide(layer)),
+	);
+
+	it.effect('distinguishes filesystem read failures from write failures', () =>
+		Effect.gen(function* () {
+			const fs = yield* FileSystem.FileSystem;
+			const directory = yield* fs.makeTempDirectoryScoped();
+			const store = yield* LibraryStore;
+			const readError = yield* store.load(directory).pipe(Effect.flip);
+			assert.strictEqual(readError._tag, 'LibraryReadError');
+			const blocker = `${directory}/blocking-file`;
+			yield* fs.writeFileString(blocker, 'unchanged');
+			const writeError = yield* store
+				.modify(`${blocker}/library.json`, () => Effect.succeed(seed))
+				.pipe(Effect.flip);
+			assert.strictEqual(writeError._tag, 'LibraryWriteError');
+			assert.strictEqual(yield* fs.readFileString(blocker), 'unchanged');
 		}).pipe(Effect.provide(layer)),
 	);
 });

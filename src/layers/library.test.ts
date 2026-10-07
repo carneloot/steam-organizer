@@ -86,7 +86,12 @@ describe('library', () => {
 	])('rejects malformed or unavailable imports %#', (input) =>
 		Effect.gen(function* () {
 			const error = yield* decodeImport(input).pipe(Effect.flip);
-			assert.strictEqual(error._tag, 'AppError');
+			assert.strictEqual(
+				error._tag,
+				input.startsWith('{"response"')
+					? 'InvalidOwnedGamesError'
+					: 'ImportDecodeError',
+			);
 		}),
 	);
 
@@ -160,6 +165,7 @@ describe('library', () => {
 				Effect.flip,
 			);
 			assert.include(error.message, 'No game with app ID 620');
+			assert.strictEqual(error._tag, 'GameNotFoundError');
 		}),
 	);
 

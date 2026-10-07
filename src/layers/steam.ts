@@ -1,10 +1,15 @@
 import { Effect, Layer, Redacted, Schema } from 'effect';
 import { HttpClient, HttpClientResponse } from 'effect/http';
 
-import { AppError, OwnedGamesResponse } from '../domain/library.js';
+import { OwnedGamesResponse } from '../domain/library.js';
 import { AppConfig, ConfigurationError } from '../services/app-config.js';
 import { LibraryService } from '../services/library.js';
-import { Steam } from '../services/steam.js';
+import {
+	Steam,
+	SteamRequestError,
+	SteamResponseError,
+	SteamTimeoutError,
+} from '../services/steam.js';
 
 const AppDetailsResponse = Schema.Record(
 	Schema.String,
@@ -80,14 +85,14 @@ export const SteamLayer = Layer.effect(
 								.pipe(
 									Effect.mapError(
 										() =>
-											new AppError({
+											new SteamRequestError({
 												message:
 													'Steam request failed. Check your network and try again.',
 											}),
 									),
 								);
 							if (response.status < 200 || response.status >= 300) {
-								return yield* new AppError({
+								return yield* new SteamRequestError({
 									message: `Steam returned HTTP ${response.status}. Check your API key and try again.`,
 								});
 							}
@@ -96,7 +101,7 @@ export const SteamLayer = Layer.effect(
 							)(response).pipe(
 								Effect.mapError(
 									() =>
-										new AppError({
+										new SteamResponseError({
 											message:
 												'Steam returned an invalid library response. Nothing was saved.',
 										}),
@@ -107,7 +112,7 @@ export const SteamLayer = Layer.effect(
 						Effect.timeout('30 seconds'),
 						Effect.catchTag('TimeoutError', () =>
 							Effect.fail(
-								new AppError({
+								new SteamTimeoutError({
 									message:
 										'Steam request timed out. Nothing was saved. Try again.',
 								}),

@@ -219,20 +219,22 @@ describe('Steam adapter', () => {
 	);
 
 	it.effect.each([
-		{ status: 403, body: {}, expected: 'HTTP 403' },
+		{ status: 403, body: {}, expected: 'HTTP 403', tag: 'SteamRequestError' },
 		{
 			status: 200,
 			body: { response: {} },
 			expected: 'Steam did not return a library',
+			tag: 'InvalidOwnedGamesError',
 		},
 		{
 			status: 200,
 			body: { response: { games: [{ appid: 'bad' }] } },
 			expected: 'invalid library response',
+			tag: 'SteamResponseError',
 		},
 	])(
 		'reports safe errors for status $status and response $body',
-		({ status, body, expected }) =>
+		({ status, body, expected, tag }) =>
 			Effect.gen(function* () {
 				const client = HttpClient.make((request) =>
 					Effect.succeed(
@@ -247,6 +249,7 @@ describe('Steam adapter', () => {
 					Effect.flip,
 				);
 				assert.include(error.message, expected);
+				assert.strictEqual(error._tag, tag);
 				assert.notInclude(JSON.stringify(error), 'test-secret-never-log');
 			}).pipe(Effect.provide(config)),
 	);

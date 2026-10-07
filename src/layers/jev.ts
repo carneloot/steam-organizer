@@ -6,9 +6,13 @@ import {
 	type ClassificationGame,
 	defaultCategoryCriteria,
 } from '../domain/classification.js';
-import { AppError } from '../domain/library.js';
 import { AppConfig, ConfigurationError } from '../services/app-config.js';
-import { Classifier } from '../services/classifier.js';
+import {
+	Classifier,
+	ClassificationRequestError,
+	ClassificationResponseError,
+	ClassificationTimeoutError,
+} from '../services/classifier.js';
 
 const probability = Schema.Number.check(
 	Schema.isBetween({ minimum: 0, maximum: 1 }),
@@ -73,7 +77,7 @@ export const JevLayer = Layer.effect(
 								}),
 								Effect.mapError(
 									() =>
-										new AppError({
+										new ClassificationRequestError({
 											message: 'Cannot encode the Jev request.',
 										}),
 								),
@@ -81,14 +85,14 @@ export const JevLayer = Layer.effect(
 							const response = yield* client.execute(request).pipe(
 								Effect.mapError(
 									() =>
-										new AppError({
+										new ClassificationRequestError({
 											message:
 												'Jev request failed. Run again to resume; previously saved games are unchanged.',
 										}),
 								),
 							);
 							if (response.status < 200 || response.status >= 300) {
-								return yield* new AppError({
+								return yield* new ClassificationRequestError({
 									message: `Jev returned HTTP ${response.status}. Check your TypeSafe API key or retry later.`,
 								});
 							}
@@ -97,7 +101,7 @@ export const JevLayer = Layer.effect(
 							)(response).pipe(
 								Effect.mapError(
 									() =>
-										new AppError({
+										new ClassificationResponseError({
 											message:
 												'Jev returned an invalid classification. This game was not saved.',
 										}),
@@ -107,7 +111,7 @@ export const JevLayer = Layer.effect(
 							for (const tag of Object.keys(categoryCriteria)) {
 								const answer = payload.answers[tag];
 								if (answer === undefined) {
-									return yield* new AppError({
+									return yield* new ClassificationResponseError({
 										message:
 											'Jev omitted a category answer. This game was not saved.',
 									});
@@ -119,7 +123,7 @@ export const JevLayer = Layer.effect(
 						Effect.timeout('30 seconds'),
 						Effect.catchTag('TimeoutError', () =>
 							Effect.fail(
-								new AppError({
+								new ClassificationTimeoutError({
 									message:
 										'Jev request timed out. This game was not saved. Run again to resume.',
 								}),

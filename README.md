@@ -82,7 +82,7 @@ node dist/cli.js classify --all --categories-file my-categories.json
 
 Existing tags and playtime groups are preserved. Changing the file does not automatically reclassify games or remove old tags. Use `untag` to remove tags you no longer want.
 
-Callers obtain the `Classifier` service and pass the same category map as the second argument to `classifier.classifyGame(game, criteria)`. The game input contains `appid`, `name`, and `description`, which is a string or `null` when unavailable. The classifier does not fetch descriptions. The exported `defaultCategoryCriteria` map in `src/domain/classification.ts` can be spread into a custom map to extend or override the defaults.
+Callers obtain the `Classifier` service and pass a decoded `CategoryCriteria` map as the second argument to `classifier.classifyGame(game, criteria)`. Decode custom maps with `Schema.decodeUnknownEffect(CategoryCriteria)` at the input boundary; the classifier does not decode them again. The game input contains `appid`, `name`, and `description`, which is a string or `null` when unavailable. The classifier does not fetch descriptions. The exported `defaultCategoryCriteria` map in `src/domain/classification.ts` can be spread into a custom map to extend or override the defaults.
 
 ## Extract categories from Steam collections
 
@@ -193,6 +193,7 @@ src/
 ├── cli.test.ts                # CLI integration tests
 ├── domain/
 │   ├── classification.ts      # Classifier input and category criteria
+│   ├── classification.test.ts # Criteria validation tests
 │   └── library.ts             # Schemas and pure library transformations
 ├── services/
 │   ├── app-config.ts          # AppConfig values and configuration errors
@@ -207,13 +208,13 @@ src/
     ├── jev.ts                 # JevLayer implements Classifier
     ├── library.ts             # LibraryLayer
     ├── library-store.ts       # FileLibraryStoreLayer
-    ├── steam.ts               # SteamLayer uses HttpClient and LibraryService
+    ├── steam.ts               # SteamLayer uses HttpClient, LibraryService, AppConfig
     └── *.test.ts              # Implementation tests
 ```
 
 List the source files with `rg --files src`. Service methods expose their result and error types without implementation dependencies. Layers acquire dependencies once and supply those methods. Pure functions, such as category derivation and library merging, stay in `domain/`.
 
-`JevLayer` requires an HTTP client and `AppConfig`, not `Steam`. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
+`JevLayer` requires an HTTP client and `AppConfig`. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
 
 ```ts
 import { Effect } from 'effect';
@@ -237,6 +238,8 @@ const classify = Effect.gen(function* () {
 ```
 
 `AppConfigLayer` reads both API keys once at layer construction and rejects whitespace-only values. `AppConfig` exposes plain redacted values, with `null` for unset keys. Jev and Steam select their credential-dependent implementation at layer construction, without checking configuration on each call. Missing keys disable classification or library sync respectively; offline commands and public Steam description lookup remain available. Tests can inject an `AppConfig` with `Layer.succeed` without reading environment variables.
+
+Each service declares its tagged errors alongside its contract. Callers can distinguish request failures, invalid responses, timeouts, invalid imports, missing games, locked files, and persistence failures without inspecting message text. `LibraryStore.modify` preserves the update callback's error type. The CLI handles these tags at the command boundary and prints their messages.
 
 ## Check changes
 

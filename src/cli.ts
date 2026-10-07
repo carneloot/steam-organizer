@@ -9,7 +9,6 @@ import {
 	defaultCategoryCriteria,
 } from './domain/classification.js';
 import {
-	AppError,
 	AppId,
 	categories,
 	Category,
@@ -30,6 +29,19 @@ import { Collections } from './services/collections.js';
 import { LibraryStore } from './services/library-store.js';
 import { LibraryService } from './services/library.js';
 import { Steam } from './services/steam.js';
+
+class InputFileError extends Schema.TaggedError<InputFileError>()(
+	'InputFileError',
+	{ message: Schema.String },
+) {}
+class InvalidCategoriesError extends Schema.TaggedError<InvalidCategoriesError>()(
+	'InvalidCategoriesError',
+	{ message: Schema.String },
+) {}
+class AccountMismatchError extends Schema.TaggedError<AccountMismatchError>()(
+	'AccountMismatchError',
+	{ message: Schema.String },
+) {}
 
 const root = Command.make('steam-categorizer').pipe(
 	Command.withDescription(
@@ -59,7 +71,7 @@ const sync = Command.make(
 			file,
 			Effect.fn(function* (previous) {
 				if (previous.steamId !== null && previous.steamId !== steamId) {
-					return yield* new AppError({
+					return yield* new AccountMismatchError({
 						message:
 							'This file belongs to another Steam account. Use --file with a different path.',
 					});
@@ -88,7 +100,7 @@ const importCommand = Command.make(
 		const text = yield* fs.readFileString(input).pipe(
 			Effect.mapError(
 				(error) =>
-					new AppError({
+					new InputFileError({
 						message: `Cannot read import ${input}: ${error.reason._tag}`,
 					}),
 			),
@@ -115,7 +127,7 @@ const extractCategories = Command.make(
 		const text = yield* fs.readFileString(input).pipe(
 			Effect.mapError(
 				(error) =>
-					new AppError({
+					new InputFileError({
 						message: `Cannot read collections ${input}: ${error.reason._tag}`,
 					}),
 			),
@@ -277,7 +289,7 @@ const review = Command.make(
 			const text = yield* fs.readFileString(categoriesFile).pipe(
 				Effect.mapError(
 					(error) =>
-						new AppError({
+						new InputFileError({
 							message: `Cannot read categories ${categoriesFile}: ${error.reason._tag}`,
 						}),
 				),
@@ -287,7 +299,7 @@ const review = Command.make(
 			)(text).pipe(
 				Effect.mapError(
 					() =>
-						new AppError({
+						new InvalidCategoriesError({
 							message: `Invalid categories file ${categoriesFile}. Expected a nonempty JSON object mapping category names to nonempty, trimmed descriptions. Names must be trimmed and cannot contain control characters.`,
 						}),
 				),
@@ -383,8 +395,25 @@ root.pipe(
 	Command.run({ version: '0.1.0' }),
 	Effect.provide(appLayer),
 	Effect.catchTags({
-		AppError: reportError,
 		ConfigurationError: reportError,
+		ClassificationRequestError: reportError,
+		ClassificationResponseError: reportError,
+		ClassificationTimeoutError: reportError,
+		SteamRequestError: reportError,
+		SteamResponseError: reportError,
+		SteamTimeoutError: reportError,
+		ImportDecodeError: reportError,
+		InvalidOwnedGamesError: reportError,
+		GameNotFoundError: reportError,
+		CollectionsDecodeError: reportError,
+		NoActiveCollectionsError: reportError,
+		LibraryReadError: reportError,
+		InvalidLibraryError: reportError,
+		LibraryLockedError: reportError,
+		LibraryWriteError: reportError,
+		InputFileError: reportError,
+		InvalidCategoriesError: reportError,
+		AccountMismatchError: reportError,
 	}),
 	Effect.provide(NodeServices.layer),
 	NodeRuntime.runMain,

@@ -202,6 +202,12 @@ describe('Jev adapter', () => {
 					Effect.flip,
 				);
 				assert.include(error.message, expected);
+				assert.strictEqual(
+					error._tag,
+					status === 200
+						? 'ClassificationResponseError'
+						: 'ClassificationRequestError',
+				);
 				assert.notInclude(JSON.stringify(error), 'jev-test-secret');
 				assert.strictEqual(calls, 1);
 			}).pipe(Effect.provide(config)),
@@ -217,6 +223,7 @@ describe('Jev adapter', () => {
 					Effect.flip,
 				);
 				assert.include(error.message, 'TYPESAFE_API_KEY');
+				assert.strictEqual(error._tag, 'ConfigurationError');
 			}).pipe(
 				Effect.provide(
 					ConfigProvider.layer(ConfigProvider.fromUnknown(values)),
@@ -245,6 +252,7 @@ describe('Jev adapter', () => {
 					Effect.flip,
 				);
 				assert.include(error.message, 'request failed');
+				assert.strictEqual(error._tag, 'ClassificationRequestError');
 				assert.notInclude(JSON.stringify(error), 'jev-test-secret');
 				assert.strictEqual(calls, 1);
 			}).pipe(Effect.provide(config)),
@@ -272,7 +280,9 @@ describe('Jev adapter', () => {
 				);
 				yield* Deferred.await(started);
 				yield* TestClock.adjust('30 seconds');
-				assert.include((yield* Fiber.join(fiber)).message, 'timed out');
+				const error = yield* Fiber.join(fiber);
+				assert.include(error.message, 'timed out');
+				assert.strictEqual(error._tag, 'ClassificationTimeoutError');
 			}).pipe(Effect.provide(config)),
 	);
 

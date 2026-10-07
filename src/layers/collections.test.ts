@@ -132,6 +132,12 @@ describe('Steam collection extraction', () => {
 		Effect.gen(function* () {
 			const error = yield* extractCategoryCriteria(input).pipe(Effect.flip);
 			assert.include(error.message, expected);
+			assert.strictEqual(
+				error._tag,
+				expected === 'No active collections'
+					? 'NoActiveCollectionsError'
+					: 'CollectionsDecodeError',
+			);
 		}),
 	);
 });

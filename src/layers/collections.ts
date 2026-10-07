@@ -4,8 +4,12 @@ import {
 	CategoryCriteria,
 	defaultCategoryCriteria,
 } from '../domain/classification.js';
-import { AppError, Category } from '../domain/library.js';
-import { Collections } from '../services/collections.js';
+import { Category } from '../domain/library.js';
+import {
+	Collections,
+	CollectionsDecodeError,
+	NoActiveCollectionsError,
+} from '../services/collections.js';
 
 export const CollectionsLayer = Layer.sync(Collections, () =>
 	Collections.of({ extractCategoryCriteria }),
@@ -30,7 +34,7 @@ const extractCategoryCriteria = Effect.fn(
 	)(input).pipe(
 		Effect.mapError(
 			() =>
-				new AppError({
+				new CollectionsDecodeError({
 					message:
 						'Invalid Steam collections file. Expected a cloud-storage-namespace JSON array of [key, record] pairs.',
 				}),
@@ -42,7 +46,9 @@ const extractCategoryCriteria = Effect.fn(
 		const record = yield* Schema.decodeUnknownEffect(CloudRecord)(value).pipe(
 			Effect.mapError(
 				() =>
-					new AppError({ message: `Invalid Steam collection record ${key}.` }),
+					new CollectionsDecodeError({
+						message: `Invalid Steam collection record ${key}.`,
+					}),
 			),
 		);
 		if (
@@ -57,7 +63,7 @@ const extractCategoryCriteria = Effect.fn(
 		).pipe(
 			Effect.mapError(
 				() =>
-					new AppError({
+					new CollectionsDecodeError({
 						message: `Invalid Steam collection value ${key}. Expected a JSON string containing a collection name.`,
 					}),
 			),
@@ -67,7 +73,7 @@ const extractCategoryCriteria = Effect.fn(
 		).pipe(
 			Effect.mapError(
 				() =>
-					new AppError({
+					new CollectionsDecodeError({
 						message: `Invalid name in Steam collection ${key}. Names must be nonempty and cannot contain control characters.`,
 					}),
 			),
@@ -75,7 +81,7 @@ const extractCategoryCriteria = Effect.fn(
 		names.add(name);
 	}
 	if (names.size === 0) {
-		return yield* new AppError({
+		return yield* new NoActiveCollectionsError({
 			message:
 				'No active collections found. Choose the cloud-storage-namespace file containing your user-collections records.',
 		});
@@ -93,7 +99,7 @@ const extractCategoryCriteria = Effect.fn(
 	).pipe(
 		Effect.mapError(
 			() =>
-				new AppError({
+				new CollectionsDecodeError({
 					message: 'Cannot convert Steam collections to category criteria.',
 				}),
 		),

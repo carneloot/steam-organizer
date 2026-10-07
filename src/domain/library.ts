@@ -1,9 +1,5 @@
 import { Schema } from 'effect';
 
-export class AppError extends Schema.TaggedError<AppError>()('AppError', {
-	message: Schema.String,
-}) {}
-
 export const AppId = Schema.Int.check(Schema.isGreaterThan(0));
 export const SteamId = Schema.String.check(Schema.isPattern(/^\d{17}$/));
 export const Category = Schema.NonEmptyString.check(

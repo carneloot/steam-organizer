@@ -1,13 +1,17 @@
 import { Effect, Layer, Schema } from 'effect';
 
 import {
-	AppError,
 	type Game,
 	type Library,
 	OwnedGamesResponse,
 	SteamGames,
 } from '../domain/library.js';
-import { LibraryService } from '../services/library.js';
+import {
+	LibraryService,
+	ImportDecodeError,
+	InvalidOwnedGamesError,
+	GameNotFoundError,
+} from '../services/library.js';
 
 export const LibraryLayer = Layer.sync(LibraryService, () =>
 	LibraryService.of({
@@ -19,7 +23,7 @@ export const LibraryLayer = Layer.sync(LibraryService, () =>
 			)(input).pipe(
 				Effect.mapError(
 					() =>
-						new AppError({
+						new ImportDecodeError({
 							message:
 								'Invalid import. Expected a Steam GetOwnedGames response or an array of games with appid, name and playtime_forever. App IDs must be unique.',
 						}),
@@ -35,7 +39,7 @@ export const LibraryLayer = Layer.sync(LibraryService, () =>
 			update: (game: Game) => Game,
 		) {
 			if (!library.games.some((game) => game.appid === appid)) {
-				return yield* new AppError({
+				return yield* new GameNotFoundError({
 					message: `No game with app ID ${appid}. Use list to find an ID.`,
 				});
 			}
@@ -54,13 +58,13 @@ const gamesFromResponse = Effect.fn('Library.gamesFromResponse')(function* (
 ) {
 	const { games, game_count } = payload.response;
 	if (games === undefined && game_count !== 0) {
-		return yield* new AppError({
+		return yield* new InvalidOwnedGamesError({
 			message:
 				'Steam did not return a library. Check the Steam ID, API key and Game details privacy settings. Your saved library was not changed.',
 		});
 	}
 	if (game_count !== undefined && game_count !== (games?.length ?? 0)) {
-		return yield* new AppError({
+		return yield* new InvalidOwnedGamesError({
 			message:
 				'Steam returned an inconsistent game count. Your saved library was not changed.',
 		});
