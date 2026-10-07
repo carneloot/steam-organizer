@@ -56,21 +56,28 @@ export class Store {
 		private owner: string,
 	) {}
 	load = Effect.fn('Store.load')(() =>
-		Effect.tryPromise(async () => {
-			await this.db
-				.prepare(
-					'INSERT OR IGNORE INTO organizer_state(owner,document) VALUES(?,?)',
-				)
-				.bind(this.owner, JSON.stringify(initial()))
-				.run();
-			const row = await this.db
-				.prepare('SELECT revision,document FROM organizer_state WHERE owner=?')
-				.bind(this.owner)
-				.first<{ revision: number; document: string }>();
-			if (!row) throw new Error('Missing state');
+		Effect.gen({ self: this }, function* () {
+			const row = yield* Effect.tryPromise(async () => {
+				await this.db
+					.prepare(
+						'INSERT OR IGNORE INTO organizer_state(owner,document) VALUES(?,?)',
+					)
+					.bind(this.owner, JSON.stringify(initial()))
+					.run();
+				const row = await this.db
+					.prepare(
+						'SELECT revision,document FROM organizer_state WHERE owner=?',
+					)
+					.bind(this.owner)
+					.first<{ revision: number; document: string }>();
+				if (!row) throw new Error('Missing state');
+				return row;
+			});
 			return {
 				revision: row.revision,
-				state: Schema.decodeUnknownSync(Document)(JSON.parse(row.document)),
+				state: yield* Schema.decodeEffect(Schema.fromJsonString(Document))(
+					row.document,
+				),
 			};
 		}),
 	);

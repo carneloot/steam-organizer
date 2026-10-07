@@ -7,3 +7,4 @@ dist/
 .alchemy/
 **/.wrangler/
 **/.dev.vars*
+web/.worker/

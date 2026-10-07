@@ -47,3 +47,8 @@ export const ClassifyInput = Schema.Struct({
 	all: Schema.Boolean,
 });
 export const ApiError = Schema.Struct({ message: Schema.String });
+export const CriteriaInput = Schema.Struct({
+	steamId: Schema.NullOr(SteamId),
+	criteria: CategoryCriteria,
+});
+export const RecoveryInput = Schema.Struct({ confirm: Schema.Literal(true) });

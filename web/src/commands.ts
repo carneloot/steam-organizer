@@ -35,15 +35,19 @@ export const Api = Command.define('Api', {
 				return yield* Effect.fail(
 					'Your session expired or access was denied. Reload and sign in again.',
 				);
-			const data: unknown = yield* Effect.tryPromise({
-				try: () => response.json(),
+			const data = yield* Effect.tryPromise({
+				try: () => response.text(),
 				catch: errorText,
 			});
 			if (!response.ok) {
-				const error = yield* Schema.decodeUnknownEffect(ApiError)(data);
+				const error = yield* Schema.decodeEffect(
+					Schema.fromJsonString(ApiError),
+				)(data);
 				return yield* Effect.fail(error.message);
 			}
-			const state = yield* Schema.decodeUnknownEffect(AppState)(data);
+			const state = yield* Schema.decodeEffect(Schema.fromJsonString(AppState))(
+				data,
+			);
 			return Message.Received({ state, action });
 		}).pipe(
 			Effect.catch((error) =>
@@ -78,7 +82,7 @@ export const ParseCollections = Command.define('ParseCollections', {
 		),
 });
 export const decodeCriteria = (text: string) =>
-	Schema.decodeUnknownSync(CategoryCriteria)(JSON.parse(text));
+	Schema.decodeSync(Schema.fromJsonString(CategoryCriteria))(text);
 export const DownloadCriteria = Command.define('DownloadCriteria', {
 	args: { text: Schema.String },
 	messages: [Message.Downloaded, Message.Failed],

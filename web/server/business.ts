@@ -1,10 +1,9 @@
-import { Effect, Schema } from 'effect';
+import { Crypto, Effect, Schema } from 'effect';
 
 import { CategoryCriteria } from '../../src/domain/classification.js';
 import {
 	Library,
 	AppId,
-	SteamId,
 	emptyLibrary,
 	mergeLibrary,
 	selectGames,
@@ -12,7 +11,13 @@ import {
 import { Classifier } from '../../src/services/classifier.js';
 import { LibraryService } from '../../src/services/library.js';
 import { Steam } from '../../src/services/steam.js';
-import { ImportInput, SyncInput, TagsInput, ClassifyInput } from '../shared.js';
+import {
+	ImportInput,
+	SyncInput,
+	TagsInput,
+	ClassifyInput,
+	CriteriaInput,
+} from '../shared.js';
 import { HttpError } from './security.js';
 import { type Env } from './services.js';
 import { parseCollections, attachCollections } from './steam-collections.js';
@@ -69,10 +74,9 @@ const decode = <A>(schema: Schema.Decoder<A>, body: unknown) =>
 		Effect.mapError(() => new HttpError(400, 'Invalid request body.')),
 	);
 const parseJson = (text: string) =>
-	Effect.try({
-		try: () => JSON.parse(text) as unknown,
-		catch: () => new HttpError(400, 'Invalid JSON import.'),
-	});
+	Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown))(text).pipe(
+		Effect.mapError(() => new HttpError(400, 'Invalid JSON import.')),
+	);
 
 export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 	store: Pick<Store, 'load' | 'modify'>,
@@ -96,8 +100,10 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 		);
 	const game = state.library.games.find((game) => game.appid === input.appid);
 	if (!game) return yield* Effect.fail(new HttpError(404, 'Game missing.'));
-	const description = yield* (yield* Steam).fetchGameDescription(input.appid);
-	const operationId = crypto.randomUUID();
+	const steam = yield* Steam;
+	const crypto = yield* Crypto.Crypto;
+	const description = yield* steam.fetchGameDescription(input.appid);
+	const operationId = yield* crypto.randomUUIDv4;
 	state = yield* store.modify((current) => {
 		if (current.completed?.requestId === input.requestId) {
 			if (current.completed.appid !== input.appid)
@@ -135,7 +141,8 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 	});
 	if (state.completed?.requestId === input.requestId) return state;
 	const paid = Effect.gen(function* () {
-		const tags = yield* (yield* Classifier).classifyGame(
+		const classifier = yield* Classifier;
+		const tags = yield* classifier.classifyGame(
 			{ ...game, description },
 			input.criteria,
 		);
@@ -218,75 +225,80 @@ export function applyResult(
 		},
 	};
 }
-export const mutate = Effect.fn('Organizer.mutate')(function* (
-	path: string,
-	body: unknown,
+export const cancelJob = Effect.fn('Organizer.cancelJob')(function* (
 	env: Env,
 	identity: string,
 ) {
 	const store = new Store(env.DB, identity);
 	const respond = (state: Document) => stateResponse(state, env, identity);
-	if (path === '/api/jobs/cancel') {
-		yield* decode(Schema.Struct({}), body);
-		return respond(
-			yield* store.modify((state) =>
-				activeJob(state)
-					? { ...state, job: { ...state.job!, cancel: true } }
-					: state,
-			),
-		);
-	}
-	if (path === '/api/criteria') {
-		const input = yield* decode(
-			Schema.Struct({
-				steamId: Schema.NullOr(SteamId),
-				criteria: CategoryCriteria,
-			}),
-			body,
-		);
-		return respond(
-			yield* store.modify((state) => {
-				unlocked(state);
-				if (state.library.steamId !== input.steamId)
-					throw new HttpError(
-						409,
-						'Steam account changed. Reload before saving categories.',
-					);
-				return {
-					...state,
-					criteriaBySteamId: {
-						...state.criteriaBySteamId,
-						[input.steamId ?? 'offline']: input.criteria,
-					},
-				};
-			}),
-		);
-	}
-	if (path === '/api/tags') {
-		const input = yield* decode(TagsInput, body);
-		return respond(
-			yield* store.modify((state) => ({
+	return respond(
+		yield* store.modify((state) =>
+			activeJob(state)
+				? { ...state, job: { ...state.job!, cancel: true } }
+				: state,
+		),
+	);
+});
+export const saveCriteria = Effect.fn('Organizer.saveCriteria')(function* (
+	input: typeof CriteriaInput.Type,
+	env: Env,
+	identity: string,
+) {
+	const store = new Store(env.DB, identity);
+	const respond = (state: Document) => stateResponse(state, env, identity);
+	return respond(
+		yield* store.modify((state) => {
+			unlocked(state);
+			if (state.library.steamId !== input.steamId)
+				throw new HttpError(
+					409,
+					'Steam account changed. Reload before saving categories.',
+				);
+			return {
 				...state,
-				library: {
-					...state.library,
-					games: state.library.games.map((game) =>
-						game.appid === input.appid ? { ...game, tags: input.tags } : game,
-					),
+				criteriaBySteamId: {
+					...state.criteriaBySteamId,
+					[input.steamId ?? 'offline']: input.criteria,
 				},
-			})),
-		);
-	}
-	if (path === '/api/classify/recover') {
-		yield* decode(Schema.Struct({ confirm: Schema.Literal(true) }), body);
-		return respond(yield* store.modify(recover));
-	}
-	if (path === '/api/classify') {
-		const input = yield* decode(ClassifyInput, body);
+			};
+		}),
+	);
+});
+export const saveTags = Effect.fn('Organizer.saveTags')(function* (
+	input: typeof TagsInput.Type,
+	env: Env,
+	identity: string,
+) {
+	const store = new Store(env.DB, identity);
+	const respond = (state: Document) => stateResponse(state, env, identity);
+	return respond(
+		yield* store.modify((state) => ({
+			...state,
+			library: {
+				...state.library,
+				games: state.library.games.map((game) =>
+					game.appid === input.appid ? { ...game, tags: input.tags } : game,
+				),
+			},
+		})),
+	);
+});
+export const recoverClassification = Effect.fn(
+	'Organizer.recoverClassification',
+)(function* (env: Env, identity: string) {
+	const store = new Store(env.DB, identity);
+	return stateResponse(yield* store.modify(recover), env, identity);
+});
+export const startClassification = Effect.fn('Organizer.startClassification')(
+	function* (input: typeof ClassifyInput.Type, env: Env, identity: string) {
+		const store = new Store(env.DB, identity);
+		const respond = (state: Document) => stateResponse(state, env, identity);
 		if (!env.TYPESAFE_API_KEY)
 			return yield* Effect.fail(
 				new HttpError(400, 'Classification is not configured.'),
 			);
-		const id = crypto.randomUUID();
+		const crypto = yield* Crypto.Crypto;
+		const id = yield* crypto.randomUUIDv4;
 		const claimed = yield* store.modify((state) => {
 			unlocked(state);
 			if (input.steamId !== state.library.steamId)
@@ -337,9 +349,12 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 				),
 			),
 		);
-	}
-	if (path === '/api/steam-collections') {
-		const input = yield* decode(ImportInput, body);
+	},
+);
+export const importCollections = Effect.fn('Organizer.importCollections')(
+	function* (input: typeof ImportInput.Type, env: Env, identity: string) {
+		const store = new Store(env.DB, identity);
+		const respond = (state: Document) => stateResponse(state, env, identity);
 		const collections = yield* Effect.try({
 			try: () => parseCollections(input.text),
 			catch: () => new HttpError(400, 'Invalid Steam collections file.'),
@@ -350,49 +365,35 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 				library: attachCollections(state.library, collections),
 			})),
 		);
-	}
-	if (path !== '/api/import' && path !== '/api/restore' && path !== '/api/sync')
-		return yield* Effect.fail(new HttpError(404, 'Unknown API route.'));
-	const operationId = crypto.randomUUID();
+	},
+);
+const replaceLibrary = Effect.fn('Organizer.replaceLibrary')(function* <
+	Error,
+	Requirements,
+>(
+	env: Env,
+	identity: string,
+	loadLibrary: (
+		previous: Library,
+	) => Effect.Effect<Library, Error, Requirements>,
+) {
+	const store = new Store(env.DB, identity);
+	const crypto = yield* Crypto.Crypto;
+	const operationId = yield* crypto.randomUUIDv4;
 	const snapshot = yield* store.modify((state) => ({
 		...unlocked(state),
 		operation: { id: operationId, expiresAt: Date.now() + 120_000 },
 	}));
 	return yield* Effect.gen(function* () {
-		let imported: Library;
-		if (path === '/api/import' || path === '/api/restore') {
-			const input = yield* decode(ImportInput, body);
-			const value = yield* parseJson(input.text);
-			if (
-				path === '/api/restore' ||
-				(typeof value === 'object' && value !== null && 'version' in value)
-			)
-				imported = yield* decode(Library, value);
-			else
-				imported = mergeLibrary(
-					snapshot.library,
-					yield* (yield* LibraryService).decodeImport(input.text),
-					snapshot.library.steamId,
-				);
-		} else {
-			const input = yield* decode(SyncInput, body);
-			const previous =
-				snapshot.library.steamId === null ||
-				snapshot.library.steamId === input.steamId
-					? snapshot.library
-					: emptyLibrary();
-			imported = mergeLibrary(
-				previous,
-				yield* (yield* Steam).fetchLibrary(input.steamId),
-				input.steamId,
-			);
-		}
-		return respond(
+		const imported = yield* loadLibrary(snapshot.library);
+		return stateResponse(
 			yield* store.modify((state) => {
 				if (state.flight || state.operation?.id !== operationId)
 					throw new HttpError(409, 'Library changed. Try again.');
 				return { ...state, library: imported, operation: null };
 			}),
+			env,
+			identity,
 		);
 	}).pipe(
 		Effect.ensuring(
@@ -406,3 +407,45 @@ export const mutate = Effect.fn('Organizer.mutate')(function* (
 		),
 	);
 });
+export const importLibrary = (
+	input: typeof ImportInput.Type,
+	env: Env,
+	identity: string,
+) =>
+	replaceLibrary(env, identity, (previous) =>
+		Effect.gen(function* () {
+			const value = yield* parseJson(input.text);
+			if (typeof value === 'object' && value !== null && 'version' in value)
+				return yield* decode(Library, value);
+			const libraryService = yield* LibraryService;
+			return mergeLibrary(
+				previous,
+				yield* libraryService.decodeImport(input.text),
+				previous.steamId,
+			);
+		}),
+	);
+export const restoreLibrary = (
+	input: typeof ImportInput.Type,
+	env: Env,
+	identity: string,
+) =>
+	replaceLibrary(env, identity, () =>
+		decode(Schema.fromJsonString(Library), input.text),
+	);
+export const syncLibrary = (
+	input: typeof SyncInput.Type,
+	env: Env,
+	identity: string,
+) =>
+	replaceLibrary(env, identity, (previous) =>
+		Effect.gen(function* () {
+			const steam = yield* Steam;
+			const ownedGames = yield* steam.fetchLibrary(input.steamId);
+			const library =
+				previous.steamId === null || previous.steamId === input.steamId
+					? previous
+					: emptyLibrary();
+			return mergeLibrary(library, ownedGames, input.steamId);
+		}),
+	);

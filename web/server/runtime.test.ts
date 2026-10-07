@@ -1,23 +1,16 @@
-import { build } from 'esbuild';
 import { Miniflare, Response, convertV4MiniflareOptions } from 'miniflare';
 import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 
-it('native Workflow saves paid results without any browser polling', async () => {
-	const bundled = await build({
-		entryPoints: ['web/server/worker.ts'],
-		bundle: true,
-		write: false,
-		format: 'esm',
-		platform: 'neutral',
-		mainFields: ['module', 'main'],
-		external: ['cloudflare:*'],
-	});
+import { buildWorker } from '../../tools/build-worker.js';
+
+it('Alchemy Effect Worker validates API requests and saves Workflow results without browser polling', async () => {
+	const bundled = await buildWorker();
 	let calls = 0;
 	const runtime = new Miniflare(
 		convertV4MiniflareOptions({
 			modules: true,
-			script: bundled.outputFiles[0]!.text,
+			script: String(bundled.files[0].content),
 			compatibilityDate: '2026-10-07',
 			compatibilityFlags: ['nodejs_compat'],
 			bindings: { LOCAL_DEV: 'true', TYPESAFE_API_KEY: 'fake-test-key' },
@@ -52,6 +45,48 @@ it('native Workflow saves paid results without any browser polling', async () =>
 		await db
 			.prepare(await readFile('web/migrations/0001_state.sql', 'utf8'))
 			.run();
+		const mutationHeaders = {
+			origin: 'http://localhost',
+			'content-type': 'application/json',
+			'x-requested-with': 'steam-organizer',
+		};
+		for (const [url, method, body, headers, status] of [
+			['http://localhost/api/missing', 'GET', undefined, {}, 404],
+			['http://localhost/api/state', 'DELETE', undefined, {}, 405],
+			['http://localhost/api/export?format=xml', 'GET', undefined, {}, 400],
+			['https://not-local.test/api/state', 'GET', undefined, {}, 403],
+			['http://localhost/api/tags', 'POST', '{', mutationHeaders, 400],
+			[
+				'http://localhost/api/sync',
+				'POST',
+				'{"steamId":"invalid","confirm":true}',
+				mutationHeaders,
+				400,
+			],
+			[
+				'http://localhost/api/classify/recover',
+				'POST',
+				'{"confirm":false}',
+				mutationHeaders,
+				400,
+			],
+			[
+				'http://localhost/api/jobs/cancel',
+				'POST',
+				'{}',
+				{ ...mutationHeaders, origin: 'https://evil.test' },
+				403,
+			],
+		] as const) {
+			const response = await runtime.dispatchFetch(url, {
+				method,
+				headers,
+				...(body === undefined ? {} : { body }),
+			});
+			expect(response.status, `${method} ${url}`).toBe(status);
+			expect(response.headers.get('cache-control')).toBe('no-store');
+			expect(await response.json()).toHaveProperty('message');
+		}
 		const post = async (route: string, body: unknown) => {
 			const response = await runtime.dispatchFetch(
 				`http://localhost/api/${route}`,

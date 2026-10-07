@@ -7,18 +7,19 @@ export interface LimitState {
 	cooldownUntil?: number;
 	adaptiveNext?: number;
 }
-export interface LimitInput {
-	method: string;
-	key: string;
-	tokens?: number;
-	limit?: number | undefined;
-	refillRate?: number;
-	allowOverflow?: boolean;
-	fallbackWindow?: number;
-	fallbackLimit?: number;
-	status?: number;
-	retryAfter?: number;
-}
+export const LimitInputSchema = Schema.Struct({
+	method: Schema.String,
+	key: Schema.String,
+	tokens: Schema.optionalKey(Schema.Finite),
+	limit: Schema.optionalKey(Schema.UndefinedOr(Schema.Finite)),
+	refillRate: Schema.optionalKey(Schema.Finite),
+	allowOverflow: Schema.optionalKey(Schema.Boolean),
+	fallbackWindow: Schema.optionalKey(Schema.Finite),
+	fallbackLimit: Schema.optionalKey(Schema.Finite),
+	status: Schema.optionalKey(Schema.Finite),
+	retryAfter: Schema.optionalKey(Schema.Finite),
+});
+export type LimitInput = typeof LimitInputSchema.Type;
 export const LimitStateSchema = Schema.Struct({
 	fixed: Schema.optionalKey(
 		Schema.Struct({ count: Schema.Finite, expiresAt: Schema.Finite }),
@@ -91,25 +92,27 @@ export function updateLimit(
 }
 export function limiterLayer(namespace: DurableObjectNamespace) {
 	const call = Effect.fn('CloudRateLimiter.call')(
-		<A>(input: LimitInput, schema: Schema.Decoder<A>) =>
-			Effect.tryPromise({
-				try: async () => {
-					const response = await namespace
-						.get(namespace.idFromName('rate-limits'))
-						.fetch('https://internal/limit', {
-							method: 'POST',
-							body: JSON.stringify(input),
-						});
-					if (!response.ok) throw new Error('Rate limit storage unavailable');
-					return Schema.decodeUnknownSync(schema)(await response.json());
-				},
-				catch: () =>
-					new RateLimiter.RateLimiterError({
-						reason: new RateLimiter.RateLimitStoreError({
-							message: 'Rate limit storage unavailable.',
-						}),
+		function* <A>(input: LimitInput, schema: Schema.Decoder<A>) {
+			const text = yield* Effect.tryPromise(async () => {
+				const response = await namespace
+					.get(namespace.idFromName('rate-limits'))
+					.fetch('https://internal/limit', {
+						method: 'POST',
+						body: JSON.stringify(input),
+					});
+				if (!response.ok) throw new Error('Rate limit storage unavailable');
+				return await response.text();
+			});
+			return yield* Schema.decodeEffect(Schema.fromJsonString(schema))(text);
+		},
+		Effect.mapError(
+			() =>
+				new RateLimiter.RateLimiterError({
+					reason: new RateLimiter.RateLimitStoreError({
+						message: 'Rate limit storage unavailable.',
 					}),
-			}),
+				}),
+		),
 	);
 	const store = Layer.succeed(
 		RateLimiter.RateLimiterStore,

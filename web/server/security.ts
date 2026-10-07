@@ -1,3 +1,5 @@
+import { Schema } from 'effect';
+
 export class HttpError extends Error {
 	constructor(
 		public status: number,
@@ -6,6 +8,10 @@ export class HttpError extends Error {
 		super(message);
 	}
 }
+export const requestError = (error: unknown) =>
+	error instanceof HttpError
+		? error
+		: new HttpError(400, 'Request failed. Please try again.');
 export async function authorize(
 	request: Request,
 	env: { LOCAL_DEV?: string },
@@ -56,7 +62,9 @@ export async function readBody(request: Request) {
 		offset += chunk.length;
 	}
 	try {
-		return JSON.parse(new TextDecoder().decode(bytes));
+		return Schema.decodeSync(Schema.fromJsonString(Schema.Unknown))(
+			new TextDecoder().decode(bytes),
+		);
 	} catch {
 		throw new HttpError(400, 'Invalid JSON.');
 	}

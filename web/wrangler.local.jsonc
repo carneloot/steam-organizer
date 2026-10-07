@@ -1,7 +1,12 @@
 {
 	"$schema": "../node_modules/wrangler/config-schema.json",
 	"name": "steam-organizer-local",
-	"main": "server/worker.ts",
+	"main": ".worker/worker.js",
+	"no_bundle": true,
+	"build": {
+		"command": "tsx tools/build-worker.ts",
+		"watch_dir": ["server", "../src", "../tools/build-worker.ts"],
+	},
 	"compatibility_date": "2026-10-07",
 	"compatibility_flags": ["nodejs_compat"],
 	"vars": { "LOCAL_DEV": "true" },

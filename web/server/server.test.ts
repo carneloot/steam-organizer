@@ -1,15 +1,46 @@
+import { NodeCrypto } from '@effect/platform-node';
 import { it, expect } from '@effect/vitest';
-import { Effect, Layer, Deferred, Exit, Fiber } from 'effect';
+import { Effect, Layer, Deferred, Exit, Fiber, Schema } from 'effect';
+import { HttpServerRequest, HttpServerResponse } from 'effect/http';
 
 import { LibraryLayer } from '../../src/layers/library.js';
 import { Classifier } from '../../src/services/classifier.js';
 import { Steam } from '../../src/services/steam.js';
-import { classifyOne, recover, unlocked, mutate } from './business.js';
+import { AppState } from '../shared.js';
+import { apiHandler } from './api.js';
+import { classifyOne, recover, unlocked } from './business.js';
 import { authorize, readBody, HttpError } from './security.js';
 import { type Env } from './services.js';
 import { parseCollections, attachCollections } from './steam-collections.js';
 import { initial, savedCriteria, Store, type Document } from './store.js';
 import { reconcile } from './workflow.js';
+
+const mutate = Effect.fnUntraced(function* (
+	path: string,
+	body: unknown,
+	env: Env,
+	owner: string,
+) {
+	const request = new Request(`http://localhost${path}`, {
+		method: 'POST',
+		headers: {
+			origin: 'http://localhost',
+			'content-type': 'application/json',
+			'x-requested-with': 'steam-organizer',
+		},
+		body: JSON.stringify(body),
+	});
+	const response = yield* apiHandler(env, owner).pipe(
+		Effect.provideService(
+			HttpServerRequest.HttpServerRequest,
+			HttpServerRequest.fromWeb(request),
+		),
+	);
+	const text = yield* Effect.promise(() =>
+		HttpServerResponse.toWeb(response).text(),
+	);
+	return yield* Schema.decodeEffect(Schema.fromJsonString(AppState))(text);
+});
 
 it('reconciles queued claim-before-create and native termination, releasing failed creation', async () => {
 	const db = fakeDb();
@@ -277,12 +308,15 @@ function fixture() {
 		},
 	};
 }
-const steamLayer = Layer.succeed(
-	Steam,
-	Steam.of({
-		fetchGameDescription: () => Effect.succeed('description'),
-		fetchLibrary: () => Effect.succeed([game]),
-	}),
+const steamLayer = Layer.merge(
+	NodeCrypto.layer,
+	Layer.succeed(
+		Steam,
+		Steam.of({
+			fetchGameDescription: () => Effect.succeed('description'),
+			fetchLibrary: () => Effect.succeed([game]),
+		}),
+	),
 );
 function fakeDb(): D1Database {
 	const rows = new Map<string, { document: string; revision: number }>();

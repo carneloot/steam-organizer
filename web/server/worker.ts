@@ -1,23 +1,23 @@
+import { makeWorkerBridge } from 'alchemy/Cloudflare/Bridge';
 import {
 	DurableObject,
+	WorkerEntrypoint,
 	WorkflowEntrypoint,
 	type WorkflowEvent,
 	type WorkflowStep,
 } from 'cloudflare:workers';
-import { Cause, Effect, Exit, Schema } from 'effect';
+import { Schema } from 'effect';
 
-import { exportLibrary } from '../../src/domain/library.js';
-import { mutate, stateResponse } from './business.js';
+import Application from './application.js';
 import {
 	updateLimit,
 	LimitStateSchema,
-	type LimitInput,
+	LimitInputSchema,
 	type LimitState,
 } from './rate-limit.js';
-import { authorize, readBody, json, HttpError } from './security.js';
-import { services, type Env } from './services.js';
-import { Store } from './store.js';
-import { reconcile, runClassification, workflowServices } from './workflow.js';
+import { json } from './security.js';
+import { type Env } from './services.js';
+import { runClassification, workflowServices } from './workflow.js';
 
 export class ClassificationWorkflow extends WorkflowEntrypoint<
 	Env,
@@ -34,11 +34,12 @@ export class ClassificationWorkflow extends WorkflowEntrypoint<
 		);
 	}
 }
-
 export class ApiCoordinator extends DurableObject<Env> {
 	async fetch(request: Request) {
 		try {
-			const input: LimitInput = await request.json();
+			const input = Schema.decodeSync(Schema.fromJsonString(LimitInputSchema))(
+				await request.text(),
+			);
 			const result = await this.ctx.storage.transaction(async (transaction) => {
 				const state: LimitState = Schema.decodeUnknownSync(LimitStateSchema)(
 					(await transaction.get(input.key)) ?? {},
@@ -53,63 +54,9 @@ export class ApiCoordinator extends DurableObject<Env> {
 		}
 	}
 }
-export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		try {
-			const identity = await authorize(request, env, ctx);
-			const url = new URL(request.url),
-				path = url.pathname;
-			if (path === '/api') throw new HttpError(404, 'Unknown API route.');
-			if (!path.startsWith('/api/')) {
-				const response = await env.ASSETS.fetch(request);
-				const headers = new Headers(response.headers);
-				headers.set('cache-control', 'no-store');
-				return new Response(response.body, {
-					status: response.status,
-					headers,
-				});
-			}
-			if (request.method === 'POST') {
-				const body = await readBody(request);
-				const exit = await Effect.runPromiseExit(
-					mutate(path, body, env, identity).pipe(Effect.provide(services(env))),
-				);
-				if (Exit.isFailure(exit)) throw Cause.squash(exit.cause);
-				return json(exit.value);
-			}
-			if (request.method !== 'GET')
-				throw new HttpError(405, 'Method not allowed.');
-			const state =
-				path === '/api/state'
-					? await reconcile(env, identity)
-					: (await Effect.runPromise(new Store(env.DB, identity).load())).state;
-			if (path === '/api/state')
-				return json(stateResponse(state, env, identity));
-			if (path === '/api/backup') return json(state.library);
-			if (path === '/api/export') {
-				const format = url.searchParams.get('format');
-				if (format !== 'json' && format !== 'csv')
-					throw new HttpError(400, 'Unknown export format.');
-				return new Response(exportLibrary(state.library, format), {
-					headers: {
-						'content-type': format === 'csv' ? 'text/csv' : 'application/json',
-						'cache-control': 'no-store',
-						'content-disposition': `attachment; filename="steam-library.${format}"`,
-						'x-content-type-options': 'nosniff',
-					},
-				});
-			}
-			throw new HttpError(404, 'Unknown API route.');
-		} catch (error) {
-			return json(
-				{
-					message:
-						error instanceof HttpError
-							? error.message
-							: 'Request failed. Please try again.',
-				},
-				error instanceof HttpError ? error.status : 400,
-			);
-		}
-	},
-};
+
+// Keep the native Workflow and Durable Object exports in the same entry module.
+export default makeWorkerBridge(WorkerEntrypoint, {
+	stack: { name: 'steam-organizer', stage: 'production' },
+	entrypoint: Application,
+});

@@ -19,7 +19,7 @@ export interface Membership {
 }
 // Dynamic filter collections are excluded: their predicates cannot be reconstructed as static membership.
 export function parseCollections(text: string): ReadonlyArray<Membership> {
-	const entries = Schema.decodeUnknownSync(Entries)(JSON.parse(text));
+	const entries = Schema.decodeSync(Schema.fromJsonString(Entries))(text);
 	const memberships: Membership[] = [];
 	for (const [key, value] of entries) {
 		if (!key.startsWith('user-collections.')) continue;
@@ -27,10 +27,10 @@ export function parseCollections(text: string): ReadonlyArray<Membership> {
 		if (record.is_deleted) continue;
 		if (typeof record.value !== 'string')
 			throw new Error('Missing collection value');
-		const collection = Schema.decodeUnknownSync(Collection)(
-			JSON.parse(record.value),
+		const collection = Schema.decodeSync(Schema.fromJsonString(Collection))(
+			record.value,
 		);
-		const name = Schema.decodeUnknownSync(Category)(collection.name.trim());
+		const name = Schema.decodeSync(Category)(collection.name.trim());
 		if (collection.filterSpec !== undefined && collection.filterSpec !== null)
 			continue;
 		const removed = new Set(collection.removed ?? []);

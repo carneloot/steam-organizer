@@ -1,3 +1,4 @@
+import { BrowserCrypto } from '@effect/platform-browser';
 import { Layer, Redacted } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 
@@ -34,6 +35,7 @@ export function services(env: Env) {
 		),
 	);
 	return Layer.mergeAll(
+		BrowserCrypto.layer,
 		SteamLayer.pipe(Layer.provide(dependencies)),
 		JevLayer.pipe(Layer.provide(dependencies)),
 		LibraryLayer,
