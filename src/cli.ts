@@ -3,6 +3,7 @@ import { NodeRuntime, NodeServices } from '@effect/platform-node';
 import { Console, Effect, FileSystem, Layer, Schema } from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
+import { RateLimiter } from 'effect/persistence';
 
 import {
 	CategoryCriteria,
@@ -23,6 +24,7 @@ import { CollectionsLayer } from './layers/collections.js';
 import { JevLayer } from './layers/jev.js';
 import { FileLibraryStoreLayer } from './layers/library-store.js';
 import { LibraryLayer } from './layers/library.js';
+import { FileRateLimiterStoreLayer } from './layers/rate-limiter-store.js';
 import { SteamLayer } from './layers/steam.js';
 import { Classifier } from './services/classifier.js';
 import { Collections } from './services/collections.js';
@@ -367,6 +369,9 @@ const appLayer = Layer.mergeAll(
 	JevLayer,
 ).pipe(
 	Layer.provide(AppConfigLayer),
+	Layer.provide(
+		RateLimiter.layer.pipe(Layer.provide(FileRateLimiterStoreLayer)),
+	),
 	Layer.provide(FetchHttpClient.layer),
 	Layer.provide(NodeServices.layer),
 );

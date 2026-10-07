@@ -1,6 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import { ConfigProvider, Deferred, Effect, Fiber, Layer } from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
+import { RateLimiter } from 'effect/persistence';
 import { TestClock } from 'effect/testing';
 
 import { Steam } from '../services/steam.js';
@@ -11,6 +12,9 @@ import { SteamLayer } from './steam.js';
 const layer = SteamLayer.pipe(
 	Layer.provide(LibraryLayer),
 	Layer.provide(AppConfigLayer),
+	Layer.provide(
+		RateLimiter.layer.pipe(Layer.provide(RateLimiter.layerStoreMemory)),
+	),
 );
 const fetchGameDescription = (appid: number) =>
 	Effect.flatMap(Steam, (steam) => steam.fetchGameDescription(appid)).pipe(
@@ -268,10 +272,13 @@ describe('Steam adapter', () => {
 					}),
 				);
 			});
-			const error = yield* fetchLibrary(steamId).pipe(
+			const fiber = yield* fetchLibrary(steamId).pipe(
 				Effect.provideService(HttpClient.HttpClient, client),
 				Effect.flip,
+				Effect.forkScoped,
 			);
+			yield* TestClock.adjust('2 seconds');
+			const error = yield* Fiber.join(fiber);
 			assert.strictEqual(attempts, 3);
 			assert.notInclude(JSON.stringify(error), 'test-secret-never-log');
 			assert.include(error.message, 'request failed');
@@ -310,9 +317,12 @@ describe('Steam adapter', () => {
 						),
 					);
 				});
-				const games = yield* fetchLibrary(steamId).pipe(
+				const fiber = yield* fetchLibrary(steamId).pipe(
 					Effect.provideService(HttpClient.HttpClient, client),
+					Effect.forkScoped,
 				);
+				yield* TestClock.adjust('2 seconds');
+				const games = yield* Fiber.join(fiber);
 				assert.deepStrictEqual(games, []);
 				assert.strictEqual(attempts, 3);
 			}).pipe(Effect.provide(config)),

@@ -1,5 +1,6 @@
 import { Effect, Layer, Redacted, Schema } from 'effect';
 import { HttpClient, HttpClientResponse } from 'effect/http';
+import { RateLimiter } from 'effect/persistence';
 
 import { OwnedGamesResponse } from '../domain/library.js';
 import { AppConfig, ConfigurationError } from '../services/app-config.js';
@@ -10,6 +11,7 @@ import {
 	SteamResponseError,
 	SteamTimeoutError,
 } from '../services/steam.js';
+import { rateLimitFeedback } from './rate-limit-feedback.js';
 
 const AppDetailsResponse = Schema.Record(
 	Schema.String,
@@ -30,9 +32,37 @@ export const SteamLayer = Layer.effect(
 		const http = yield* HttpClient.HttpClient;
 		const library = yield* LibraryService;
 		const config = yield* AppConfig;
+		const limiter = yield* RateLimiter.RateLimiter;
+		const storeClient = http.pipe(
+			HttpClient.transformResponse(
+				Effect.tap(
+					rateLimitFeedback(limiter, 'store.steampowered.com', 300_000),
+				),
+			),
+			HttpClient.withRateLimiter({
+				limiter,
+				key: 'store.steampowered.com',
+				limit: 1,
+				window: '2 seconds',
+				times: 0,
+			}),
+		);
+		const libraryClient = http.pipe(
+			HttpClient.transformResponse(
+				Effect.tap(rateLimitFeedback(limiter, 'api.steampowered.com', 60_000)),
+			),
+			HttpClient.withRateLimiter({
+				limiter,
+				key: 'api.steampowered.com',
+				limit: 1,
+				window: '1 second',
+				times: 0,
+			}),
+			HttpClient.retryTransient({ times: 2 }),
+		);
 		const fetchGameDescription = Effect.fn('Steam.fetchGameDescription')(
 			function* (appid: number) {
-				const response = yield* http.get(
+				const response = yield* storeClient.get(
 					'https://store.steampowered.com/api/appdetails',
 					{
 						urlParams: { appids: String(appid), l: 'english' },
@@ -68,8 +98,7 @@ export const SteamLayer = Layer.effect(
 					)
 				: Effect.fn('Steam.fetchLibrary')(
 						function* (steamId: string) {
-							const client = http.pipe(HttpClient.retryTransient({ times: 2 }));
-							const response = yield* client
+							const response = yield* libraryClient
 								.get(
 									'https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/',
 									{

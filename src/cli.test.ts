@@ -132,6 +132,7 @@ describe('CLI integration', () => {
 					env: {
 						...process.env,
 						TYPESAFE_API_KEY: 'test-key',
+						API_RATE_LIMIT_DIRECTORY: join(directory, 'rate-limits'),
 						MOCK_FAIL: fail,
 					},
 				},

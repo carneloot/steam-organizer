@@ -1,5 +1,6 @@
 import { Effect, Layer, Schema } from 'effect';
 import { HttpClient, HttpClientRequest, HttpClientResponse } from 'effect/http';
+import { RateLimiter } from 'effect/persistence';
 
 import {
 	type CategoryCriteria,
@@ -13,6 +14,7 @@ import {
 	ClassificationResponseError,
 	ClassificationTimeoutError,
 } from '../services/classifier.js';
+import { rateLimitFeedback } from './rate-limit-feedback.js';
 
 const probability = Schema.Finite.check(
 	Schema.isBetween({ minimum: 0, maximum: 1 }),
@@ -28,8 +30,21 @@ const JevResponse = Schema.Struct({
 export const JevLayer = Layer.effect(
 	Classifier,
 	Effect.gen(function* () {
-		const client = yield* HttpClient.HttpClient;
+		const http = yield* HttpClient.HttpClient;
 		const config = yield* AppConfig;
+		const limiter = yield* RateLimiter.RateLimiter;
+		const client = http.pipe(
+			HttpClient.transformResponse(
+				Effect.tap(rateLimitFeedback(limiter, 'api.typesafe.ai', 60_000)),
+			),
+			HttpClient.withRateLimiter({
+				limiter,
+				key: 'api.typesafe.ai',
+				limit: 1,
+				window: '1 second',
+				times: 0,
+			}),
+		);
 		const key = config.jevApiKey;
 		const classifyGame =
 			key === null

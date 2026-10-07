@@ -132,6 +132,26 @@ If Steam does not return your games, check your Steam ID, API key, and **Game de
 
 Sync includes played free games. Your key stays in memory and is not written to the library file. Requests use HTTPS, retry transient failures twice, and have a 30-second deadline.
 
+## API rate limits
+
+`SteamLayer` and `JevLayer` construct their clients directly with Effect's `HttpClient.withRateLimiter`. The CLI provides `RateLimiter` backed by `FileRateLimiterStoreLayer`. Each API has a separate initial budget:
+
+| API                      | Initial pacing                            |
+| ------------------------ | ----------------------------------------- |
+| Steam Web API            | One request per second, including retries |
+| Steam store descriptions | One request every two seconds             |
+| TypeSafe Jev             | One request per second                    |
+
+These are conservative application defaults, not promises about provider capacity. Steam's [Web API terms](https://steamcommunity.com/dev/apiterms) allow 100,000 calls per day. TypeSafe's [model documentation](https://docs.typesafe.ai/models) currently lists 80 requests per second and 100K tokens per second, with limits subject to change. Valve does not publish a quota for the public store endpoint in those Web API terms.
+
+Effect inspects rate-limit response headers. HTTP 429 responses also persist a cooldown based on `Retry-After`, supporting both seconds and HTTP dates. Without a usable header, the cooldown is five minutes for the Steam store and one minute for the other APIs. Jev requests are still not retried automatically. Steam's existing retries pass through the limiter.
+
+Counters and cooldowns are shared across CLI processes and restarts in `~/.cache/steam-categorizer/rate-limits`, independently of `--file` and the working directory. Set `API_RATE_LIMIT_DIRECTORY` to use another shared directory. State files contain no API keys or request payloads. Writes use locks, atomic rename, and owner-only file permissions. Invalid or unwritable state prevents requests rather than bypassing the limiter.
+
+Rate-limit waits count toward the existing request deadlines. A long cooldown can cause sync or classification to time out without sending a request. Description lookups still fall back to no description after five seconds. After a crash, remove stale `.lock` directories from the rate-limit directory only after confirming that no CLI process is running.
+
+The store coordinates processes that share its directory, not other applications or machines using the same credentials or public IP. Callers that compose `SteamLayer` or `JevLayer` outside the CLI must provide `RateLimiter.layer` and a `RateLimiterStore`. Both adapters apply their rate-limit policy without a separate HTTP wrapper. HTTP unit tests use Effect's in-memory store; filesystem store tests are separate.
+
 ## Categorize and find games
 
 Use `list` to find app IDs, then add your own tags:
@@ -208,19 +228,24 @@ src/
     ├── jev.ts                 # JevLayer implements Classifier
     ├── library.ts             # LibraryLayer
     ├── library-store.ts       # FileLibraryStoreLayer
-    ├── steam.ts               # SteamLayer uses HttpClient, LibraryService, AppConfig
+    ├── rate-limit-feedback.ts # Retry-After date workaround and fallback cooldowns
+    ├── rate-limiter-store.ts  # FileRateLimiterStoreLayer implements Effect's store
+    ├── steam.ts               # SteamLayer uses HttpClient, RateLimiter, LibraryService, AppConfig
     └── *.test.ts              # Implementation tests
 ```
 
 List the source files with `rg --files src`. Service methods expose their result and error types without implementation dependencies. Layers acquire dependencies once and supply those methods. Pure functions, such as category derivation and library merging, stay in `domain/`.
 
-`JevLayer` requires an HTTP client and `AppConfig`. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
+`JevLayer` requires an HTTP client, `AppConfig`, and `RateLimiter`. The CLI obtains descriptions through `Steam` and passes them to `Classifier`. Another caller can supply descriptions from a different source without providing a Steam layer:
 
 ```ts
-import { Effect } from 'effect';
+import { NodeServices } from '@effect/platform-node';
+import { Effect, Layer } from 'effect';
 import { FetchHttpClient } from 'effect/http';
+import { RateLimiter } from 'effect/persistence';
 import { AppConfigLayer } from './src/layers/app-config.js';
 import { JevLayer } from './src/layers/jev.js';
+import { FileRateLimiterStoreLayer } from './src/layers/rate-limiter-store.js';
 import { Classifier } from './src/services/classifier.js';
 
 const classify = Effect.gen(function* () {
@@ -233,7 +258,11 @@ const classify = Effect.gen(function* () {
 }).pipe(
 	Effect.provide(JevLayer),
 	Effect.provide(AppConfigLayer),
+	Effect.provide(
+		RateLimiter.layer.pipe(Layer.provide(FileRateLimiterStoreLayer)),
+	),
 	Effect.provide(FetchHttpClient.layer),
+	Effect.provide(NodeServices.layer),
 );
 ```
 

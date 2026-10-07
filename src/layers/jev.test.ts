@@ -10,6 +10,7 @@ import {
 	Schema,
 } from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
+import { RateLimiter } from 'effect/persistence';
 import { TestClock } from 'effect/testing';
 
 import {
@@ -21,10 +22,17 @@ import { Classifier } from '../services/classifier.js';
 import { AppConfigLayer } from './app-config.js';
 import { JevLayer } from './jev.js';
 
+const limiterLayer = RateLimiter.layer.pipe(
+	Layer.provide(RateLimiter.layerStoreMemory),
+);
 const classifyGame = (game: ClassificationGame, criteria?: CategoryCriteria) =>
 	Effect.flatMap(Classifier, (classifier) =>
 		classifier.classifyGame(game, criteria),
-	).pipe(Effect.provide(JevLayer.pipe(Layer.provide(AppConfigLayer))));
+	).pipe(
+		Effect.provide(
+			JevLayer.pipe(Layer.provide(AppConfigLayer), Layer.provide(limiterLayer)),
+		),
+	);
 
 const config = ConfigProvider.layer(
 	ConfigProvider.fromUnknown({ TYPESAFE_API_KEY: 'jev-test-secret' }),
@@ -305,6 +313,7 @@ describe('Jev adapter', () => {
 			).pipe(
 				Effect.provide(
 					JevLayer.pipe(
+						Layer.provide(limiterLayer),
 						Layer.provide(
 							Layer.succeed(
 								AppConfig,
