@@ -197,4 +197,6 @@ npm run build
 
 Use `npm run lint:fix` and `npm run format:fix` to apply fixes. Oxlint enables all five Effect rules vendored from Sheetz's `tools/oxlint/anti-slop/effect` plugin. Oxfmt uses the Sheetz configuration without its web-only Tailwind stylesheet path.
 
+Oxlint also runs the official Effect type-aware rules from the `@effect/tsgo` recommended preset. The `prepare` script patches Oxlint and `oxlint-tsgolint` after `npm install` or `npm ci`; it does not patch TypeScript. These three packages are pinned to compatible versions. When upgrading them, check the [supported versions and Oxlint setup guide](https://github.com/Effect-TS/tsgo/blob/main/docs/README.md). The Oxlint integration is experimental. Recommended rule severities are retained, so warnings are reported without failing lint unless `--deny-warnings` is passed.
+
 The tests cover category boundaries, input validation, refresh preservation, CSV escaping, persistence, competing writers, credential-safe errors, request deadlines, and command-line workflows. Jev tests also cover multi-label probability thresholds, malformed answers, per-game saves, resuming after failure, and preserving existing tags. HTTP tests use injected clients or mocked fetch responses and do not need real credentials.
