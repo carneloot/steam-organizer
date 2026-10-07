@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Oxlint JS plugins reserve large virtual arenas but use little physical RAM.
+# Linux's default overcommit heuristic rejects those arenas in small orbs.
+sudo -n sysctl -w vm.overcommit_memory=1

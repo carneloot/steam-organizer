@@ -5,6 +5,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 echo "Using Node $(node --version) and npm $(npm --version)"
 
+echo "Configuring virtual memory for Oxlint JavaScript plugins"
+bash .agents/resume
+
 echo "Installing dependencies from package-lock.json"
 time npm ci --engine-strict --no-audit --no-fund
 
