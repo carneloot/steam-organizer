@@ -2,7 +2,7 @@ import { Config, Effect, Layer, Redacted, Schema } from 'effect';
 import { HttpClient, HttpClientRequest, HttpClientResponse } from 'effect/http';
 
 import {
-	CategoryCriteria,
+	type CategoryCriteria,
 	type ClassificationGame,
 	defaultCategoryCriteria,
 } from '../domain/classification.js';
@@ -29,17 +29,6 @@ export const JevLayer = Layer.effect(
 				game: ClassificationGame,
 				categoryCriteria: CategoryCriteria = defaultCategoryCriteria,
 			) {
-				const criteria = yield* Schema.decodeUnknownEffect(CategoryCriteria)(
-					categoryCriteria,
-				).pipe(
-					Effect.mapError(
-						() =>
-							new AppError({
-								message:
-									'Invalid categories. Provide at least one category with a nonempty, trimmed name and description. Names cannot contain control characters.',
-							}),
-					),
-				);
 				const key = yield* Config.Redacted('TYPESAFE_API_KEY').pipe(
 					Effect.mapError(
 						() =>
@@ -55,7 +44,7 @@ export const JevLayer = Layer.effect(
 					});
 				}
 				const questions = Object.fromEntries(
-					Object.entries(criteria).map(([tag, description]) => [
+					Object.entries(categoryCriteria).map(([tag, description]) => [
 						tag,
 						{
 							type: 'noul',
@@ -112,7 +101,7 @@ export const JevLayer = Layer.effect(
 					),
 				);
 				const tags: string[] = [];
-				for (const tag of Object.keys(criteria)) {
+				for (const tag of Object.keys(categoryCriteria)) {
 					const answer = payload.answers[tag];
 					if (answer === undefined) {
 						return yield* new AppError({

@@ -1,11 +1,11 @@
 import { assert, describe, it } from '@effect/vitest';
-import { ConfigProvider, Deferred, Effect, Fiber, Predicate } from 'effect';
+import { ConfigProvider, Deferred, Effect, Fiber, Predicate, Schema } from 'effect';
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http';
 import { TestClock } from 'effect/testing';
 
-import type {
+import {
 	CategoryCriteria,
-	ClassificationGame,
+	type ClassificationGame,
 } from '../domain/classification.js';
 import { Classifier } from '../services/classifier.js';
 import { JevLayer } from './jev.js';
@@ -46,10 +46,10 @@ describe('Jev adapter', () => {
 		'uses only supplied category criteria, missing answer: %s',
 		(missing) =>
 			Effect.gen(function* () {
-				const criteria = {
+				const criteria = yield* Schema.decodeUnknownEffect(CategoryCriteria)({
 					'Cozy farming': 'Includes farming and low-pressure play.',
 					Competitive: 'Players compete against each other.',
-				};
+				});
 				const client = HttpClient.make((request) =>
 					Effect.sync(() => {
 						assert.strictEqual(request.method, 'POST');
@@ -90,26 +90,6 @@ describe('Jev adapter', () => {
 				if (missing)
 					assert.include((yield* result.pipe(Effect.flip)).message, 'omitted');
 				else assert.deepStrictEqual(yield* result, ['Cozy farming']);
-			}).pipe(Effect.provide(config)),
-	);
-
-	it.effect.each([
-		{},
-		{ '': 'Some description' },
-		{ ' Untrimmed': 'Description' },
-		{ 'Bad\nname': 'Description' },
-		{ Valid: '' },
-		{ Valid: '   ' },
-	])(
-		'rejects invalid category criteria before making requests: %s',
-		(criteria) =>
-			Effect.gen(function* () {
-				const client = HttpClient.make(() => Effect.die('must not request'));
-				const error = yield* classifyGame(game, criteria).pipe(
-					Effect.provideService(HttpClient.HttpClient, client),
-					Effect.flip,
-				);
-				assert.include(error.message, 'Invalid categories');
 			}).pipe(Effect.provide(config)),
 	);
 
