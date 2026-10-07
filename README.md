@@ -2,7 +2,7 @@
 
 Organize your Steam library with an Effect v4 CLI. Sync your games, review them one at a time, and keep custom tags locally.
 
-The CLI does not edit collections in the Steam client. Its runtime dependencies are `effect@4.0.1` and `@effect/platform-node@4.0.1`. TypeScript, `tsx`, Vitest, and `@effect/vitest` are development tooling.
+The CLI does not edit collections in the Steam client. Its runtime dependencies are `effect@4.0.1` and `@effect/platform-node@4.0.1`. TypeScript, `tsx`, Vitest, `@effect/vitest`, Oxlint, and Oxfmt are development tooling.
 
 ## Run the CLI
 
@@ -105,8 +105,12 @@ If a command reports a locked library, wait for the writer to finish. After a cr
 
 ```sh
 npm run check
+npm run lint
+npm run format
 npm test
 npm run build
 ```
+
+Use `npm run lint:fix` and `npm run format:fix` to apply fixes. Oxlint enables all five Effect rules vendored from Sheetz's `tools/oxlint/anti-slop/effect` plugin. Oxfmt uses the Sheetz configuration without its web-only Tailwind stylesheet path.
 
 The tests cover category boundaries, input validation, refresh preservation, CSV escaping, persistence, competing writers, credential-safe errors, request deadlines, and command-line workflows. Steam HTTP tests use an injected client and do not need real credentials.

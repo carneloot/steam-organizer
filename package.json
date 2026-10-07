@@ -1,26 +1,37 @@
 {
-  "name": "steam-categorizer",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "Organize a Steam library locally with an Effect v4 CLI",
-  "bin": { "steam-categorizer": "dist/cli.js" },
-  "scripts": {
-    "dev": "tsx src/cli.ts",
-    "build": "tsc",
-    "check": "tsc --noEmit",
-    "test": "vitest run"
-  },
-  "engines": { "node": ">=22.19.0" },
-  "dependencies": {
-    "effect": "4.0.1",
-    "@effect/platform-node": "4.0.1"
-  },
-  "devDependencies": {
-    "@effect/vitest": "4.0.1",
-    "@types/node": "^22.0.0",
-    "tsx": "^4.20.0",
-    "typescript": "^5.9.0",
-    "vitest": "^5.0.0"
-  }
+	"name": "steam-categorizer",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Organize a Steam library locally with an Effect v4 CLI",
+	"bin": {
+		"steam-categorizer": "dist/cli.js"
+	},
+	"type": "module",
+	"scripts": {
+		"dev": "tsx src/cli.ts",
+		"build": "tsc",
+		"check": "tsc --noEmit",
+		"test": "vitest run",
+		"lint": "oxlint .",
+		"lint:fix": "oxlint --fix .",
+		"format": "oxfmt --check .",
+		"format:fix": "oxfmt ."
+	},
+	"dependencies": {
+		"@effect/platform-node": "4.0.1",
+		"effect": "4.0.1"
+	},
+	"devDependencies": {
+		"@effect/vitest": "4.0.1",
+		"@oxlint/plugins": "1.86.0",
+		"@types/node": "^22.0.0",
+		"oxfmt": "^0.71.0",
+		"oxlint": "^1.86.0",
+		"tsx": "^4.20.0",
+		"typescript": "^5.9.0",
+		"vitest": "^5.0.0"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
 }

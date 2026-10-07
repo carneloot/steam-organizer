@@ -1,11 +1,16 @@
 {
-  "response": {
-    "game_count": 4,
-    "games": [
-      { "appid": 620, "name": "Portal 2", "playtime_forever": 480, "playtime_2weeks": 35 },
-      { "appid": 413150, "name": "Stardew Valley", "playtime_forever": 75 },
-      { "appid": 1245620, "name": "ELDEN RING", "playtime_forever": 0 },
-      { "appid": 1086940, "name": "Baldur's Gate 3", "playtime_forever": 7200 }
-    ]
-  }
+	"response": {
+		"game_count": 4,
+		"games": [
+			{
+				"appid": 620,
+				"name": "Portal 2",
+				"playtime_forever": 480,
+				"playtime_2weeks": 35
+			},
+			{ "appid": 413150, "name": "Stardew Valley", "playtime_forever": 75 },
+			{ "appid": 1245620, "name": "ELDEN RING", "playtime_forever": 0 },
+			{ "appid": 1086940, "name": "Baldur's Gate 3", "playtime_forever": 7200 }
+		]
+	}
 }

@@ -1,0 +1,27 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "unicorn"],
+	"categories": {
+		"correctness": "error"
+	},
+	"env": {
+		"builtin": true,
+		"node": true
+	},
+	"ignorePatterns": ["node_modules/**", "dist/**", "tools/oxlint/anti-slop/**"],
+	"jsPlugins": [
+		{
+			"name": "anti-slop-effect",
+			"specifier": "./tools/oxlint/anti-slop/effect/index.ts"
+		}
+	],
+	"rules": {
+		"@typescript-eslint/ban-ts-comment": "error",
+		"@typescript-eslint/no-explicit-any": "error",
+		"anti-slop-effect/no-manual-effect-error-tag": "error",
+		"anti-slop-effect/no-manual-tag-comparison": "error",
+		"anti-slop-effect/no-manual-tagged-construction": "error",
+		"anti-slop-effect/no-service-constructor-imports": "error",
+		"anti-slop-effect/prefer-effect-match": "error"
+	}
+}
