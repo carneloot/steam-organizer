@@ -1,6 +1,6 @@
 # Steam categorizer
 
-Organize your Steam library with an Effect v4 CLI. Sync your games, review them one at a time, and keep custom tags locally.
+Organize your Steam library with an Effect v4 CLI. Sync your games, classify them automatically with TypeSafe's Jev model, and keep tags locally.
 
 The CLI does not edit collections in the Steam client. Its runtime dependencies are `effect@4.0.1` and `@effect/platform-node@4.0.1`. TypeScript, `tsx`, Vitest, `@effect/vitest`, Oxlint, and Oxfmt are development tooling.
 
@@ -23,12 +23,33 @@ Use a separate file so the sample does not replace your own library:
 ```sh
 node dist/cli.js --file .steam-categorizer/demo.json import examples/games.json
 node dist/cli.js --file .steam-categorizer/demo.json list
-node dist/cli.js --file .steam-categorizer/demo.json review
 ```
 
-In review, use the arrow keys to choose an action. Press Space to toggle tags and Enter to continue. Enter additional tags separated by commas, or leave that prompt empty.
+## Classify games with Jev
 
-Each reviewed game saves immediately. Skipped games stay unreviewed. Run `review` again to resume, or `review --all` to revisit saved decisions.
+Get a TypeSafe API key from the [TypeSafe console](https://console.typesafe.ai/). In Bash, read the key without adding it to shell history:
+
+```sh
+read -r -s -p 'TypeSafe API key: ' TYPESAFE_API_KEY
+echo
+export TYPESAFE_API_KEY
+node dist/cli.js --file .steam-categorizer/demo.json classify
+unset TYPESAFE_API_KEY
+```
+
+`classify` is an alias for `review`. Both now run without per-game prompts. Omit `--file` to classify your default library.
+
+The CLI calls `jev-latest` once per game, with all category questions in that request. It adds tags whose yes probability is at least 0.8:
+
+`Action`, `Adventure`, `RPG`, `Strategy`, `Simulation`, `Puzzle`, `Platformer`, `Racing`, `Sports`, `Horror`, `Roguelike`, and `Co-op`.
+
+Jev uses its knowledge of each game's name and Steam app ID. The CLI does not fetch store descriptions, so unknown games may receive no tags. These are model predictions, not verified Steam metadata. It never guesses personal labels such as `Completed`, `Dropped`, or `Favorites`.
+
+Each successful classification saves immediately and marks the game reviewed, even if no tags meet the threshold. Existing tags are preserved. Run `classify` again to resume after an interruption or failure, or use `classify --all` to include previously reviewed games. Reclassification adds tags but does not remove existing ones. Use `untag` to remove a wrong prediction.
+
+Use `--search` and `--category` to limit classification, for example `classify --category Unplayed`. Games reviewed manually in older versions are skipped unless you use `--all`.
+
+Classification sends game names and app IDs to TypeSafe and may incur API charges. Steam IDs, playtime, and existing tags are not sent. The API key is not saved. Each request has a 30-second deadline, including response decoding. Failed requests are not retried automatically to avoid duplicate charges; run the command again to resume.
 
 ## Sync your Steam library
 
@@ -61,7 +82,7 @@ node dist/cli.js categories
 node dist/cli.js review --category Unplayed
 ```
 
-Tag names are case-sensitive. Search and category filters are case-insensitive. A game can have several tags. Use `list --json` for machine-readable output, or `list --unreviewed` to see games that still need review.
+Tag names are case-sensitive. Search and category filters are case-insensitive. A game can have several tags. Use `list --json` for machine-readable output, or `list --unreviewed` to see games that have not been classified or reviewed.
 
 Automatic groups come from Steam playtime:
 
@@ -113,4 +134,4 @@ npm run build
 
 Use `npm run lint:fix` and `npm run format:fix` to apply fixes. Oxlint enables all five Effect rules vendored from Sheetz's `tools/oxlint/anti-slop/effect` plugin. Oxfmt uses the Sheetz configuration without its web-only Tailwind stylesheet path.
 
-The tests cover category boundaries, input validation, refresh preservation, CSV escaping, persistence, competing writers, credential-safe errors, request deadlines, and command-line workflows. Steam HTTP tests use an injected client and do not need real credentials.
+The tests cover category boundaries, input validation, refresh preservation, CSV escaping, persistence, competing writers, credential-safe errors, request deadlines, and command-line workflows. Jev tests also cover multi-label probability thresholds, malformed answers, per-game saves, resuming after failure, and preserving existing tags. HTTP tests use injected clients or mocked fetch responses and do not need real credentials.

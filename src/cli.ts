@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
-import { Console, Effect, FileSystem, Layer, Schema } from 'effect';
-import { Argument, Command, Flag, Prompt } from 'effect/cli';
+import { Console, Effect, FileSystem, Layer } from 'effect';
+import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
 
+import { classifyGame } from './jev.js';
 import {
 	AppError,
 	AppId,
@@ -222,77 +223,28 @@ const review = Command.make(
 		const store = yield* LibraryStore;
 		const initial = yield* store.load(file);
 		const games = selectGames(initial, search, category, !all);
-		const knownTags = new Set([
-			'Backlog',
-			'Playing',
-			'Completed',
-			'Dropped',
-			'Favorites',
-			'Co-op',
-			...initial.games.flatMap((game) => game.tags),
-		]);
 		for (const game of games) {
 			yield* Console.log(
 				`\n${terminalText(game.name)} (${game.appid}) | ${(game.playtime_forever / 60).toFixed(1)}h | ${categories(game).join(', ')}`,
 			);
-			const action = yield* Prompt.Select({
-				message: 'Review this game',
-				choices: [
-					{ title: 'Choose tags and mark reviewed', value: 'edit' },
-					{ title: 'Skip', value: 'skip' },
-					{ title: 'Quit', value: 'quit' },
-				],
-			});
-			if (action === 'quit') break;
-			if (action === 'skip') continue;
-			const choices = [...knownTags].sort();
-			const tags = yield* Prompt.MultiSelect({
-				message: 'Custom tags, Space to toggle, Enter to save',
-				choices: choices.map((tag) => ({
-					title: tag,
-					value: tag,
-					selected: game.tags.includes(tag),
-				})),
-			});
-			const extra = yield* Prompt.String({
-				message: 'Additional tags, comma-separated, or Enter for none',
-				validate: (text) =>
-					Schema.decodeUnknownEffect(Schema.Array(Category))(
-						text
-							.split(',')
-							.map((tag) => tag.trim())
-							.filter(Boolean),
-					).pipe(
-						Effect.as(text),
-						Effect.mapError(() => 'Tags cannot contain control characters.'),
-					),
-			});
-			const selected = [
-				...new Set([
-					...tags,
-					...extra
-						.split(',')
-						.map((tag) => tag.trim())
-						.filter(Boolean),
-				]),
-			];
+			const tags = yield* classifyGame(game);
 			yield* store.modify(file, (library) =>
 				updateGame(library, game.appid, (current) => ({
 					...current,
-					tags: selected,
+					tags: [...new Set([...current.tags, ...tags])],
 					reviewed: true,
 				})),
 			);
-			for (const tag of selected) knownTags.add(tag);
-			yield* Console.log('Saved.');
+			yield* Console.log(`Saved Jev tags: ${tags.join(', ') || 'none'}.`);
 		}
 		yield* Console.log(
-			'Review finished. Saved games will be skipped next time unless you use --all.',
+			`Classified ${games.length} games. Saved games will be skipped next time unless you use --all.`,
 		);
 	}),
 ).pipe(
+	Command.withAlias('classify'),
 	Command.withDescription(
-		'Interactively tag unreviewed games. Saves after each game.',
+		'Automatically tag unreviewed games with TypeSafe Jev. Requires TYPESAFE_API_KEY. Saves after each game.',
 	),
 );
 
