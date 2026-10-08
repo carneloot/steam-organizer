@@ -58,11 +58,19 @@ Configure deployment before merging the workflow:
    | `ACCESS_EMAILS`         | Comma-separated explicit email addresses for you and your friends |
 
 3. Grant the Cloudflare token edit permissions for Workers Scripts, D1, Access Apps and Policies, Access Identity Providers, and Account Secrets Store. The state store also uses Workers and Secrets Store permissions.
-4. Give a 1Password service account read access to the item. Create a GitHub environment named `production` and store its token there as the secret `OP_SERVICE_ACCOUNT_TOKEN`. Restrict the environment to `main` and add required reviewers if you want approval before deployment.
+4. Give a 1Password service account read access to the item. Store its token as the GitHub repository secret `OP_SERVICE_ACCOUNT_TOKEN` so same-repository PR plans can use it. Create a GitHub environment named `production`, restrict it to `main`, and add required reviewers if you want approval before deployment. You can override the repository token with an environment secret of the same name for deployment.
 
-The workflow uses `1password/load-secrets-action@v5`, matching `bg3-equipment-guide`. Each field resolves from `op://Secrets/steam-organizer-github/<field>`. Only the deploy step receives the resolved values. No Cloudflare profile or additional state password is required.
+The workflows use `1password/load-secrets-action@v5`, matching `bg3-equipment-guide`. Each field resolves from `op://Secrets/steam-organizer-github/<field>`. Resolved values are passed only to deployment, planning, and comment redaction steps, not exported globally. No Cloudflare profile or additional state password is required.
 
 Alchemy uses Cloudflare-backed state and the `production` stage, so fresh GitHub runners share the same deployment state. If you already deployed with the previous local-state configuration, migrate that state before enabling CI deployment. Do not discard it or automatically adopt existing resources.
+
+### Production plans on pull requests
+
+The [Alchemy Production Plan workflow](.github/workflows/alchemy-plan.yml) follows `sheetz`: it plans the PR head against the `production` stage and creates or updates one bot-owned PR comment. The comment lists resource, binding, and stack-action changes, identifies the revision, and links to the workflow run. Planning failures also produce a comment and fail the job. Outdated runs are canceled and do not overwrite comments for a newer revision.
+
+The workflow uses Alchemy's structured `Stack.plan` API without applying the plan. It disables state-store updates, so the Cloudflare-backed state store must already be bootstrapped through an authorized deployment before PR planning can succeed. Planning still evaluates PR code and contacts Cloudflare; it is not an offline diff. Raw logs and resource properties are excluded from comments, and configured secrets and allowlisted emails are redacted.
+
+Fork PRs are skipped. Same-repository PR authors must be trusted with the production credentials because their code runs in the planning job. The plan job does not use the `production` environment restricted to `main`; it needs the repository-level 1Password token described above. Production deployment still uses the protected environment.
 
 Cloudflare permits one email PIN identity provider per scope. If an existing provider is not owned by this stack, resolve its reuse or adoption before the first deployment. The workflow does not pass `--adopt` automatically.
 

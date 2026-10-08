@@ -1,0 +1,110 @@
+name: Alchemy Production Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: alchemy-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PLAN_SNAPSHOT_FILE: /tmp/alchemy-plan.json
+      PLAN_COMMENT_FILE: /tmp/alchemy-plan-comment.md
+      PLAN_SHA: ${{ github.event.pull_request.head.sha }}
+      PLAN_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run web:build
+
+      - name: Load production secrets from 1Password
+        id: secrets
+        uses: 1password/load-secrets-action@v5
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: op://Secrets/steam-organizer-github/CLOUDFLARE_ACCOUNT_ID
+          CLOUDFLARE_API_TOKEN: op://Secrets/steam-organizer-github/CLOUDFLARE_API_TOKEN
+          STEAM_API_KEY: op://Secrets/steam-organizer-github/STEAM_API_KEY
+          TYPESAFE_API_KEY: op://Secrets/steam-organizer-github/TYPESAFE_API_KEY
+          ACCESS_EMAILS: op://Secrets/steam-organizer-github/ACCESS_EMAILS
+
+      - name: Generate production plan
+        id: plan
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ steps.secrets.outputs.CLOUDFLARE_API_TOKEN }}
+          STEAM_API_KEY: ${{ steps.secrets.outputs.STEAM_API_KEY }}
+          TYPESAFE_API_KEY: ${{ steps.secrets.outputs.TYPESAFE_API_KEY }}
+          ACCESS_EMAILS: ${{ steps.secrets.outputs.ACCESS_EMAILS }}
+          ALCHEMY_STAGE: production
+          ALCHEMY_PLAIN: '1'
+          NO_COLOR: '1'
+        run: |
+          set +e
+          npx --no-install tsx tools/write-alchemy-plan.ts "$PLAN_SNAPSHOT_FILE"
+          status=$?
+          set -e
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize production plan
+        if: always() && !cancelled()
+        env:
+          PLAN_EXIT_CODE: ${{ steps.plan.outputs.exit_code || '1' }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ steps.secrets.outputs.CLOUDFLARE_API_TOKEN }}
+          STEAM_API_KEY: ${{ steps.secrets.outputs.STEAM_API_KEY }}
+          TYPESAFE_API_KEY: ${{ steps.secrets.outputs.TYPESAFE_API_KEY }}
+          ACCESS_EMAILS: ${{ steps.secrets.outputs.ACCESS_EMAILS }}
+        run: npx --no-install tsx tools/alchemy-plan-comment.ts
+
+      - name: Create or update plan comment
+        if: always() && !cancelled()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const marker = '<!-- alchemy-production-plan -->';
+            const { data: pull } = await github.rest.pulls.get({ ...context.repo, pull_number: context.issue.number });
+            if (pull.head.sha !== process.env.PLAN_SHA) return;
+            const body = fs.existsSync(process.env.PLAN_COMMENT_FILE)
+              ? fs.readFileSync(process.env.PLAN_COMMENT_FILE, 'utf8')
+              : `${marker}\n## Alchemy production plan\n\nPlanning failed before a summary was generated. See [the workflow run](${process.env.PLAN_RUN_URL}).`;
+            const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: context.issue.number, per_page: 100 });
+            const existing = comments.find(comment => comment.user?.login === 'github-actions[bot]' && comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+            await core.summary.addRaw(body).write();
+
+      - name: Fail when planning failed
+        if: always() && !cancelled() && (steps.plan.outputs.exit_code != '0' || steps.plan.conclusion != 'success')
+        run: exit 1
