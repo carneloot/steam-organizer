@@ -34,7 +34,9 @@ Use **Category criteria** to edit classification questions or import a criteria 
 
 ## Background classification
 
-**Classify** submits the current search and category filter to a Cloudflare Workflow. Jobs snapshot category definitions and process at most 500 games. The Workflow saves each game's results in D1 and continues after the tab closes. Reopening the app loads saved progress. **Cancel job** stops at the next game boundary, preserving any in-flight result.
+**Classify** submits the current search and category filter to a Cloudflare Workflow. Jobs snapshot category definitions and process at most 500 games, in batches of up to three concurrent games. The Workflow saves each game's results in D1 and continues after the tab closes. Reopening the app loads saved progress. **Cancel job** prevents new paid requests and preserves results from requests already in flight. Jobs started before concurrent classification was added finish sequentially.
+
+The workflow uses Alchemy's Effect-native `Workflow` and `task` APIs. The custom Worker entry exports Alchemy's workflow bridge as `ClassificationWorkflow`, retaining the deployed `CLASSIFICATION` binding. Checkpoint names remain stable so existing jobs can replay saved steps.
 
 Paid requests are not automatically retried. If a provider response is lost, the app blocks further classification until you explicitly clear the uncertain paid lock. Recovery can cause duplicate charges. Starting a new job skips already reviewed games unless you select the option to include them.
 
@@ -129,7 +131,7 @@ Before classification, the CLI tries to fetch the game's English description fro
 
 Jev uses the description and its knowledge of the game to predict tags. These are model predictions, not verified Steam metadata. The default categories do not include personal labels such as `Completed`, `Dropped`, or `Favorites`.
 
-Each successful classification saves immediately and marks the game reviewed, even if no tags meet the threshold. Existing tags are preserved. Run `classify` again to resume after an interruption or failure, or use `classify --all` to include previously reviewed games. Reclassification adds tags but does not remove existing ones. Use `untag` to remove a wrong prediction.
+The CLI classifies games in batches of up to three concurrent games while retaining Steam and TypeSafe rate limits. Each successful classification saves immediately and marks the game reviewed, even if no tags meet the threshold. Saves run one at a time to prevent file-lock conflicts. If a game fails, the CLI saves successful results from the rest of the batch before stopping. Existing tags are preserved. Run `classify` again to resume after an interruption or failure, or use `classify --all` to include previously reviewed games. Reclassification adds tags but does not remove existing ones. Use `untag` to remove a wrong prediction.
 
 Use `--search` and `--category` to limit classification, for example `classify --category Unplayed`. Games reviewed manually in older versions are skipped unless you use `--all`.
 

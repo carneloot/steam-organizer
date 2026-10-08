@@ -73,13 +73,19 @@ it('reconciles queued claim-before-create and native termination, releasing fail
 	};
 	const env = { DB: db, CLASSIFICATION: binding } as unknown as Env;
 	await claim();
-	expect((await reconcile(env, 'a@test')).job?.status).toBe('queued');
+	expect((await Effect.runPromise(reconcile(env, 'a@test'))).job?.status).toBe(
+		'queued',
+	);
 	expect(created).toEqual([
 		{ id: 'deterministic', params: { owner: 'a@test', id: 'deterministic' } },
 	]);
 	status = 'terminated';
-	expect((await reconcile(env, 'a@test')).job?.status).toBe('failed');
-	expect((await reconcile(env, 'b@test')).job).toBeUndefined();
+	expect((await Effect.runPromise(reconcile(env, 'a@test'))).job?.status).toBe(
+		'failed',
+	);
+	expect(
+		(await Effect.runPromise(reconcile(env, 'b@test'))).job,
+	).toBeUndefined();
 	await claim();
 	binding.create = async () => {
 		throw new Error('start failed');
@@ -87,7 +93,9 @@ it('reconciles queued claim-before-create and native termination, releasing fail
 	binding.get = async () => {
 		throw new Error('missing');
 	};
-	expect((await reconcile(env, 'a@test')).job?.status).toBe('failed');
+	expect((await Effect.runPromise(reconcile(env, 'a@test'))).job?.status).toBe(
+		'failed',
+	);
 	const failed = (await Effect.runPromise(store.load())).state;
 	expect(() => unlocked(failed)).not.toThrow();
 });
@@ -390,6 +398,160 @@ it.effect(
 				'Action',
 			]);
 			expect(JSON.stringify(testFixture.get())).not.toContain('action games');
+		}),
+);
+it.effect(
+	'concurrent job requests persist independently through D1 CAS and replay out of order',
+	() =>
+		Effect.gen(function* () {
+			const store = new Store(fakeDb(), 'parallel');
+			yield* store.modify((state) => ({
+				...state,
+				requests: {},
+				library: {
+					...library,
+					games: [1, 2, 3].map((appid) => ({ ...game, appid })),
+				},
+				job: {
+					id: 'job',
+					status: 'running',
+					total: 3,
+					completed: 0,
+					current: null,
+					error: null,
+					cancel: false,
+					steamId: null,
+					ids: [1, 2, 3],
+					criteria: input.criteria,
+				},
+			}));
+			const entered = yield* Effect.forEach([1, 2, 3], () =>
+				Deferred.make<void>(),
+			);
+			const release = yield* Effect.forEach([1, 2, 3], () =>
+				Deferred.make<void>(),
+			);
+			const calls: number[] = [];
+			const classifier = Layer.succeed(
+				Classifier,
+				Classifier.of({
+					classifyGame: (game) =>
+						Effect.gen(function* () {
+							calls.push(game.appid);
+							yield* Deferred.succeed(entered[game.appid - 1]!, undefined);
+							yield* Deferred.await(release[game.appid - 1]!);
+							return [`Tag ${game.appid}`];
+						}),
+				}),
+			);
+			const run = (appid: number) =>
+				classifyOne(store, {
+					...input,
+					appid,
+					requestId: `job:${appid - 1}`,
+				}).pipe(Effect.provide(Layer.merge(steamLayer, classifier)));
+			const fibers = yield* Effect.forEach([1, 2, 3], (appid) =>
+				run(appid).pipe(Effect.forkScoped),
+			);
+			yield* Effect.forEach(entered, Deferred.await);
+			expect(calls.slice().sort((a, b) => a - b)).toEqual([1, 2, 3]);
+			expect(Exit.isFailure(yield* Effect.exit(run(2)))).toBe(true);
+			yield* Deferred.succeed(release[2]!, undefined);
+			yield* Fiber.join(fibers[2]!);
+			expect((yield* store.load()).state.job?.completed).toBe(1);
+			yield* run(3);
+			yield* store.modify((state) => ({
+				...state,
+				library: {
+					...state.library,
+					games: state.library.games.map((game) => ({
+						...game,
+						tags: [...game.tags, 'Edited'],
+					})),
+				},
+			}));
+			yield* Deferred.succeed(release[0]!, undefined);
+			yield* Deferred.succeed(release[1]!, undefined);
+			yield* Effect.forEach(fibers, Fiber.join);
+			yield* run(1);
+			const state = (yield* store.load()).state;
+			expect(state.job?.completed).toBe(3);
+			expect(state.library.games.map((game) => game.tags)).toEqual([
+				['Custom', 'Edited', 'Tag 1'],
+				['Custom', 'Edited', 'Tag 2'],
+				['Custom', 'Tag 3', 'Edited'],
+			]);
+			expect(
+				Object.values(state.requests ?? {})
+					.map((paid) => paid.completed!.appid)
+					.sort((a, b) => a - b),
+			).toEqual([1, 2, 3]);
+			expect(calls).toHaveLength(3);
+		}),
+);
+it.effect(
+	'cancellation during description lookup prevents a new paid request',
+	() =>
+		Effect.gen(function* () {
+			const testFixture = fixture();
+			testFixture.set({
+				...testFixture.get(),
+				requests: {},
+				job: {
+					id: 'job',
+					status: 'running',
+					total: 1,
+					completed: 0,
+					current: null,
+					error: null,
+					cancel: false,
+					steamId: null,
+					ids: [1],
+					criteria: input.criteria,
+				},
+			});
+			const entered = yield* Deferred.make<void>();
+			const release = yield* Deferred.make<void>();
+			let calls = 0;
+			const steam = Layer.succeed(
+				Steam,
+				Steam.of({
+					fetchLibrary: () => Effect.succeed([game]),
+					fetchGameDescription: () =>
+						Effect.gen(function* () {
+							yield* Deferred.succeed(entered, undefined);
+							yield* Deferred.await(release);
+							return 'description';
+						}),
+				}),
+			);
+			const classifier = Layer.succeed(
+				Classifier,
+				Classifier.of({
+					classifyGame: () =>
+						Effect.sync(() => {
+							calls++;
+							return ['Action'];
+						}),
+				}),
+			);
+			const running = yield* classifyOne(testFixture.store, {
+				...input,
+				requestId: 'job:0',
+			}).pipe(
+				Effect.provide(Layer.mergeAll(NodeCrypto.layer, steam, classifier)),
+				Effect.forkScoped,
+			);
+			yield* Deferred.await(entered);
+			testFixture.set({
+				...testFixture.get(),
+				job: { ...testFixture.get().job!, cancel: true },
+			});
+			yield* Deferred.succeed(release, undefined);
+			yield* Fiber.join(running);
+			expect(calls).toBe(0);
+			expect(testFixture.get().requests).toEqual({});
+			expect(testFixture.get().job?.completed).toBe(0);
 		}),
 );
 it.effect(

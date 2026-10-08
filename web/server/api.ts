@@ -105,10 +105,9 @@ export const apiHandler = (env: Env, identity: string) =>
 					'GET',
 					'/api/state',
 					Effect.gen(function* () {
-						const state = yield* Effect.tryPromise({
-							try: () => reconcile(env, identity),
-							catch: requestError,
-						});
+						const state = yield* reconcile(env, identity).pipe(
+							Effect.mapError(requestError),
+						);
 						return HttpServerResponse.fromWeb(
 							json(Business.stateResponse(state, env, identity)),
 						);

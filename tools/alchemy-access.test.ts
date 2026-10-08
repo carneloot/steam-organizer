@@ -75,6 +75,15 @@ it.effect(
 				},
 			});
 			const props = stack.resources.Web?.Props;
+			expect(props.env.CLASSIFICATION).toMatchObject({
+				name: 'Classification',
+				className: 'ClassificationWorkflow',
+			});
+			expect(stack.resources.Classification).toMatchObject({
+				Type: 'Cloudflare.Workflow',
+				LogicalId: 'Classification',
+				Props: { className: 'ClassificationWorkflow' },
+			});
 			expect(props.access === access).toBe(true);
 			expect(props.env.ACCESS_TEAM_DOMAIN).toBe(
 				'https://existing-team.cloudflareaccess.com',

@@ -81,6 +81,94 @@ describe('CLI integration', () => {
 		}
 	}, 30_000);
 
+	it('classifies three games concurrently and serializes immediate saves without losing tags', () => {
+		const directory = mkdtempSync(join(tmpdir(), 'steam-parallel-cli-'));
+		const file = join(directory, 'library.json');
+		const mock = join(directory, 'mock.mjs');
+		try {
+			writeFileSync(
+				file,
+				JSON.stringify({
+					version: 1,
+					steamId: null,
+					games: [1, 2, 3, 4].map((appid) => ({
+						appid,
+						name: `Game ${appid}`,
+						playtime_forever: 0,
+						tags: ['Custom'],
+						reviewed: false,
+					})),
+				}),
+			);
+			writeFileSync(
+				mock,
+				`
+				import { readFileSync } from 'node:fs';
+				let active = 0;
+				const pending = [];
+				globalThis.fetch = async (input, init) => {
+					const request = new Request(input, init);
+					const url = new URL(request.url);
+					if (url.origin === 'https://store.steampowered.com') return Response.json({});
+					if (url.origin !== 'https://api.typesafe.ai') throw new Error('Unexpected endpoint');
+					const payload = await request.json();
+					const appid = payload.state.appid;
+					if (++active > 3) throw new Error('Concurrency limit exceeded');
+					if (appid <= 3) {
+						await new Promise(resolve => {
+							pending.push(resolve);
+							if (pending.length === 3) pending.forEach(release => release());
+						});
+					} else {
+						const saved = JSON.parse(readFileSync(process.env.MOCK_LIBRARY, 'utf8'));
+						if (!saved.games.slice(0, 3).every(game => game.reviewed)) throw new Error('Next batch started before saves');
+					}
+					active--;
+					return Response.json({ answers: Object.fromEntries(Object.keys(payload.questions).map(tag => [tag, { type: 'noul', noul: tag === 'Puzzle' ? 0.95 : 0.1 }])) });
+				};
+			`,
+			);
+			const result = spawnSync(
+				process.execPath,
+				[
+					'--import',
+					mock,
+					'--import',
+					'tsx',
+					'src/cli.ts',
+					'--file',
+					file,
+					'classify',
+				],
+				{
+					encoding: 'utf8',
+					timeout: 15_000,
+					env: {
+						...process.env,
+						TYPESAFE_API_KEY: 'test-key',
+						API_RATE_LIMIT_DIRECTORY: join(directory, 'rate-limits'),
+						MOCK_LIBRARY: file,
+					},
+				},
+			);
+			assert.strictEqual(result.status, 0, result.stderr);
+			assert.include(result.stdout, 'Classified 4 games');
+			const saved = JSON.parse(readFileSync(file, 'utf8'));
+			assert.deepStrictEqual(
+				saved.games.map((game: { tags: string[]; reviewed: boolean }) => ({
+					tags: game.tags,
+					reviewed: game.reviewed,
+				})),
+				[1, 2, 3, 4].map(() => ({
+					tags: ['Custom', 'Puzzle'],
+					reviewed: true,
+				})),
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	}, 20_000);
+
 	it('classifies without prompts, preserves tags, resumes after failure and supports filters and --all', () => {
 		const directory = mkdtempSync(join(tmpdir(), 'steam-jev-cli-'));
 		const file = join(directory, 'library.json');
