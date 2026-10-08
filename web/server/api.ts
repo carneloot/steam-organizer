@@ -105,9 +105,9 @@ export const apiHandler = (env: Env, identity: string) =>
 					'GET',
 					'/api/state',
 					Effect.gen(function* () {
-						const state = yield* reconcile(env, identity).pipe(
-							Effect.mapError(requestError),
-						);
+						yield* reconcile(env, identity).pipe(Effect.mapError(requestError));
+						const store = yield* Store;
+						const state = yield* store.getView();
 						return HttpServerResponse.fromWeb(
 							json(Business.stateResponse(state, env, identity)),
 						);
@@ -117,8 +117,9 @@ export const apiHandler = (env: Env, identity: string) =>
 					'GET',
 					'/api/backup',
 					Effect.gen(function* () {
-						const { state } = yield* new Store(env.DB, identity).load();
-						return HttpServerResponse.fromWeb(json(state.library));
+						const store = yield* Store;
+						const library = yield* store.getLibrary();
+						return HttpServerResponse.fromWeb(json(library));
 					}),
 				);
 				yield* router.add(
@@ -134,19 +135,17 @@ export const apiHandler = (env: Env, identity: string) =>
 							return yield* Effect.fail(
 								new HttpError(400, 'Unknown export format.'),
 							);
-						const { state } = yield* new Store(env.DB, identity).load();
-						return HttpServerResponse.text(
-							exportLibrary(state.library, format),
-							{
-								headers: {
-									'content-type':
-										format === 'csv' ? 'text/csv' : 'application/json',
-									'cache-control': 'no-store',
-									'content-disposition': `attachment; filename="steam-library.${format}"`,
-									'x-content-type-options': 'nosniff',
-								},
+						const store = yield* Store;
+						const library = yield* store.getLibrary();
+						return HttpServerResponse.text(exportLibrary(library, format), {
+							headers: {
+								'content-type':
+									format === 'csv' ? 'text/csv' : 'application/json',
+								'cache-control': 'no-store',
+								'content-disposition': `attachment; filename="steam-library.${format}"`,
+								'x-content-type-options': 'nosniff',
 							},
-						);
+						});
 					}),
 				);
 				yield* router.add(
@@ -156,4 +155,4 @@ export const apiHandler = (env: Env, identity: string) =>
 				);
 			}),
 		),
-	).pipe(Effect.flatten);
+	).pipe(Effect.flatten, Effect.provide(Store.layer(env.DB, identity)));

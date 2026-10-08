@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 
 import { buildWorker } from '../../tools/build-worker.js';
-import { Store } from './store.js';
+import { testStore } from './test-db.js';
 
 it('Alchemy Effect Worker validates API requests and saves Workflow results without browser polling', async () => {
 	const issuer = 'https://runtime-team.cloudflareaccess.com';
@@ -85,9 +85,13 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 	);
 	try {
 		const db = await runtime.getD1Database('DB');
-		await db
-			.prepare(await readFile('web/migrations/0001_state.sql', 'utf8'))
-			.run();
+		const sql = await readFile('web/migrations/0001_state.sql', 'utf8');
+		await db.batch(
+			sql
+				.split(';')
+				.filter((statement) => statement.trim())
+				.map((statement) => db.prepare(statement)),
+		);
 		const jwtHeaders = {
 			'cf-access-jwt-assertion': token,
 			'cf-access-authenticated-user-email': 'attacker@example.test',
@@ -116,9 +120,9 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			},
 		);
 		expect(imported.status).toBe(200);
-		expect(
-			await db.prepare('SELECT owner FROM organizer_state').all(),
-		).toMatchObject({ results: [{ owner: 'runtime@example.test' }] });
+		expect(await db.prepare('SELECT owner FROM libraries').all()).toMatchObject(
+			{ results: [{ owner: 'runtime@example.test' }] },
+		);
 		const anonymousPage = await runtime.dispatchFetch(
 			'https://not-local.test/',
 			{
@@ -207,16 +211,15 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			all: false,
 		});
 		// No further HTTP requests: read persisted state directly while the job runs.
-		const store = new Store(db, 'local@example.test');
+		const store = await Effect.runPromise(testStore(db, 'local@example.test'));
 		const waitForJob = async () => {
-			let { state } = await Effect.runPromise(store.load());
+			let job = await Effect.runPromise(store.getJob());
 			for (let attempt = 0; attempt < 150; attempt++) {
-				if (state.job?.status === 'complete' || state.job?.status === 'failed')
-					break;
+				if (job?.status === 'complete' || job?.status === 'failed') break;
 				await new Promise((resolve) => setTimeout(resolve, 100));
-				state = (await Effect.runPromise(store.load())).state;
+				job = await Effect.runPromise(store.getJob());
 			}
-			return state;
+			return Effect.runPromise(store.getView());
 		};
 		let document = await waitForJob();
 		expect(document.job?.status).toBe('complete');
@@ -241,11 +244,25 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 		expect(document.job?.status).toBe('failed');
 		expect(document.job?.completed).toBe(0);
 		expect(calls).toBe(6);
-		expect(Object.keys(document.requests ?? {})).toHaveLength(3);
+		expect(
+			await db
+				.prepare(
+					'SELECT count(*) AS count FROM classification_requests WHERE owner=?',
+				)
+				.bind('local@example.test')
+				.first(),
+		).toEqual({ count: 3 });
 		for (const [index, appid] of [400, 401, 402].entries())
 			expect(
-				document.requests?.[`${document.job?.id}:${index}`]?.flight?.appid,
-			).toBe(appid);
+				await Effect.runPromise(
+					store.getRequest(`${document.job?.id}:${index}`),
+				),
+			).toMatchObject({
+				appid,
+				tags: null,
+				completed: false,
+				operationId: null,
+			});
 		expect(document.library.games.map((game) => game.tags)).toEqual([
 			[],
 			['Puzzle'],
@@ -254,6 +271,14 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			[],
 		]);
 		await post('classify/recover', { confirm: true });
+		expect(
+			await db
+				.prepare(
+					'SELECT count(*) AS count FROM classification_requests WHERE owner=?',
+				)
+				.bind('local@example.test')
+				.first(),
+		).toEqual({ count: 0 });
 	} finally {
 		await runtime.dispose();
 	}

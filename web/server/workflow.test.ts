@@ -1,14 +1,21 @@
+import { NodeCrypto } from '@effect/platform-node';
 import {
 	WorkflowStep,
 	WorkflowStepContext,
 	type WorkflowTaskOptions,
 } from 'alchemy/Cloudflare/Workflows';
-import { Effect, type Scope } from 'effect';
+import { Effect, Layer, type Scope } from 'effect';
 import { expect, it } from 'vitest';
 
-import { applyResult, recover, unlocked } from './business.js';
+import {
+	Classifier,
+	ClassificationRequestError,
+} from '../../src/services/classifier.js';
+import { Steam } from '../../src/services/steam.js';
+import { classifyOne } from './business.js';
 import { HttpError } from './security.js';
-import { initial, type Document } from './store.js';
+import { Store } from './store.js';
+import { seedLibrary, testDb, testStore } from './test-db.js';
 import {
 	ensureStarted,
 	runClassification,
@@ -44,11 +51,11 @@ const run = (id: string, operations: WorkflowServices) =>
 			Effect.provideService(WorkflowStep, step),
 		),
 	);
-function fixture(ids = [1, 2], parallel = false) {
-	let state: Document = {
-		...initial(),
-		...(parallel ? { requests: {} } : {}),
-		library: {
+async function fixture(ids = [1, 2]) {
+	const { db, sqlite } = testDb();
+	const store = await Effect.runPromise(testStore(db, 'owner'));
+	await Effect.runPromise(
+		seedLibrary(store, {
 			version: 1,
 			steamId: null,
 			games: ids.map((appid) => ({
@@ -58,62 +65,64 @@ function fixture(ids = [1, 2], parallel = false) {
 				tags: [],
 				reviewed: false,
 			})),
-		},
-		job: {
-			id: 'job',
-			status: 'queued',
-			total: ids.length,
-			completed: 0,
-			current: null,
-			error: null,
-			cancel: false,
+		}),
+	);
+	await Effect.runPromise(
+		store.saveCriteria({ steamId: null, criteria: { Action: 'action' } }),
+	);
+	await Effect.runPromise(
+		store.startJob('job', {
 			steamId: null,
-			ids,
-			criteria: { Action: 'action' },
-		},
-	};
-	let calls = 0;
+			search: '',
+			category: '',
+			all: true,
+		}),
+	);
+	let provider: (
+		appid: number,
+	) => Effect.Effect<string[], ClassificationRequestError> = () =>
+		Effect.succeed(['Action']);
+	const calls: number[] = [];
+	const layer = Layer.mergeAll(
+		NodeCrypto.layer,
+		Layer.succeed(
+			Steam,
+			Steam.of({
+				fetchLibrary: () => Effect.succeed([]),
+				fetchGameDescription: () => Effect.succeed('description'),
+			}),
+		),
+		Layer.succeed(
+			Classifier,
+			Classifier.of({
+				classifyGame: (game) =>
+					Effect.suspend(() => {
+						calls.push(game.appid);
+						return provider(game.appid);
+					}),
+			}),
+		),
+	);
 	const operations: WorkflowServices = {
-		load: () => Effect.sync(() => state),
-		modify: (update) =>
-			Effect.sync(() => {
-				state = update(state);
-				return state;
-			}),
+		getJob: store.getJob,
+		beginBatch: store.beginBatch,
+		shouldClassify: store.shouldClassify,
+		finishJob: store.finishJob,
+		failJob: store.failJob,
 		classify: (input) =>
-			Effect.sync(() => {
-				calls++;
-				state = applyResult(
-					state.requests === undefined
-						? {
-								...state,
-								flight: input,
-								result: { ...input, tags: ['Action'] },
-							}
-						: {
-								...state,
-								requests: {
-									...state.requests,
-									[input.requestId]: {
-										operation: null,
-										completed: null,
-										flight: input,
-										result: { ...input, tags: ['Action'] },
-									},
-								},
-							},
-					input.requestId,
-					input.appid,
-				);
-				return state;
-			}),
+			classifyOne(input).pipe(
+				Effect.provideService(Store, store),
+				Effect.provide(layer),
+			),
 	};
 	return {
+		store,
+		sqlite,
 		operations,
-		get: () => state,
-		calls: () => calls,
-		set: (next: Document) => {
-			state = next;
+		calls,
+		get: () => Effect.runPromise(store.getView()),
+		setProvider: (next: typeof provider) => {
+			provider = next;
 		},
 	};
 }
@@ -124,205 +133,165 @@ function gate() {
 	});
 	return { promise, open };
 }
-it('runs at most three games concurrently and replays out-of-order completions without charging again', async () => {
-	const testFixture = fixture([1, 2, 3, 4, 5], true);
-	const classify = testFixture.operations.classify;
-	const entered = Array.from({ length: 5 }, gate);
-	const release = Array.from({ length: 5 }, gate);
-	const saved = Array.from({ length: 5 }, gate);
-	const started: number[] = [];
-	testFixture.operations.classify = (input) =>
+
+it('runs three games concurrently and replays out-of-order completions without charging again', async () => {
+	const test = await fixture([1, 2, 3, 4, 5]);
+	const entered = Array.from({ length: 5 }, gate),
+		release = Array.from({ length: 5 }, gate),
+		saved = Array.from({ length: 5 }, gate);
+	test.setProvider((appid) =>
 		Effect.gen(function* () {
-			started.push(input.appid);
-			entered[input.appid - 1]!.open();
-			yield* Effect.promise(() => release[input.appid - 1]!.promise);
-			const state = yield* classify(input);
-			saved[input.appid - 1]!.open();
-			return state;
-		});
-	const running = run('job', testFixture.operations);
+			entered[appid - 1]!.open();
+			yield* Effect.promise(() => release[appid - 1]!.promise);
+			return ['Action'];
+		}),
+	);
+	const classify = test.operations.classify;
+	test.operations.classify = (input) =>
+		classify(input).pipe(
+			Effect.tap(() => Effect.sync(() => saved[input.appid - 1]!.open())),
+		);
+	const running = run('job', test.operations);
 	await Promise.all(entered.slice(0, 3).map((item) => item.promise));
-	expect(started).toEqual([1, 2, 3]);
+	expect(test.calls).toEqual([1, 2, 3]);
 	release[2]!.open();
 	await saved[2]!.promise;
-	expect(testFixture.get().job?.completed).toBe(1);
-	expect(testFixture.get().library.games.map((game) => game.reviewed)).toEqual([
-		false,
-		false,
-		true,
-		false,
-		false,
-	]);
-	expect(started).toEqual([1, 2, 3]);
-	// Stop this pass after draining the batch, then replay without a step journal.
-	testFixture.set({
-		...testFixture.get(),
-		job: { ...testFixture.get().job!, cancel: true },
-	});
+	expect((await test.get()).job?.completed).toBe(1);
+	expect((await test.get()).library.games.map((game) => game.reviewed)).toEqual(
+		[false, false, true, false, false],
+	);
+	expect(test.calls).toEqual([1, 2, 3]);
+	await Effect.runPromise(test.store.cancelJob());
 	release[0]!.open();
 	release[1]!.open();
 	await running;
-	expect(testFixture.get().job?.status).toBe('cancelled');
-	expect(testFixture.get().job?.completed).toBe(3);
-	testFixture.set({
-		...testFixture.get(),
-		job: { ...testFixture.get().job!, cancel: false, status: 'running' },
+	expect((await test.get()).job).toMatchObject({
+		status: 'cancelled',
+		completed: 3,
 	});
-	const replay = run('job', testFixture.operations);
+	// Simulate losing the workflow journal while durable results and manual edits survive.
+	test.sqlite.exec("UPDATE classification_jobs SET cancel=0,status='running'");
+	await Effect.runPromise(
+		test.store.saveTags({ appid: 3, tags: ['Edited after completion'] }),
+	);
+	const replay = run('job', test.operations);
 	await Promise.all(entered.slice(3).map((item) => item.promise));
-	expect(started).toEqual([1, 2, 3, 4, 5]);
+	expect(test.calls).toEqual([1, 2, 3, 4, 5]);
 	release[4]!.open();
 	release[3]!.open();
 	await replay;
-	expect(testFixture.calls()).toBe(5);
-	expect(testFixture.get().job?.completed).toBe(5);
-	expect(testFixture.get().job?.status).toBe('complete');
-	expect(testFixture.get().library.games.every((game) => game.reviewed)).toBe(
+	expect((await test.get()).job).toMatchObject({
+		status: 'complete',
+		completed: 5,
+	});
+	expect((await test.get()).library.games.every((game) => game.reviewed)).toBe(
 		true,
 	);
+	expect((await Effect.runPromise(test.store.getGame(3)))?.game.tags).toEqual([
+		'Edited after completion',
+	]);
+	for (let i = 0; i < 5; i++)
+		expect(
+			await Effect.runPromise(test.store.getRequest(`job:${i}`)),
+		).toMatchObject({ completed: true, appid: i + 1 });
 });
-it('drains successful in-flight games on failure and recovers each uncertain request', async () => {
-	const testFixture = fixture([1, 2, 3, 4], true);
-	const classify = testFixture.operations.classify;
-	const entered = gate();
-	const release = gate();
-	let count = 0;
-	testFixture.operations.classify = (input) =>
+
+it('drains successful in-flight siblings before failing, preserves uncertain requests and requires consent recovery', async () => {
+	const test = await fixture([1, 2, 3, 4]);
+	const entered = [gate(), gate(), gate()],
+		release = [gate(), gate(), gate()];
+	test.setProvider((appid) =>
 		Effect.gen(function* () {
-			if (++count === 3) entered.open();
-			yield* Effect.promise(() => release.promise);
-			if (input.appid === 2) return yield* classify(input);
-			testFixture.set({
-				...testFixture.get(),
-				requests: {
-					...testFixture.get().requests,
-					[input.requestId]: {
-						operation: null,
-						flight: input,
-						result: null,
-						completed: null,
-					},
-				},
+			entered[appid - 1]!.open();
+			yield* Effect.promise(() => release[appid - 1]!.promise);
+			if (appid === 2) return ['Action'];
+			return yield* new ClassificationRequestError({
+				message: 'provider lost',
 			});
-			return yield* Effect.fail(new HttpError(409, 'provider lost'));
-		});
-	const running = run('job', testFixture.operations);
-	const rejected = expect(running).rejects.toThrow('provider lost');
-	await entered.promise;
-	release.open();
-	await rejected;
-	expect(count).toBe(3);
-	expect(testFixture.get().job?.status).toBe('failed');
-	expect(testFixture.get().job?.completed).toBe(1);
-	expect(testFixture.get().library.games[1]?.reviewed).toBe(true);
-	expect(() => unlocked(testFixture.get())).toThrow('uncertain');
-	const state = testFixture.get();
-	testFixture.set({
-		...state,
-		requests: {
-			...state.requests,
-			'job:0': {
-				...state.requests!['job:0']!,
-				operation: { id: 'still-saving', expiresAt: Date.now() + 120_000 },
-				result: { requestId: 'job:0', appid: 1, tags: ['Recovered'] },
-			},
-		},
-	});
-	expect(() => recover(testFixture.get())).toThrow('active');
-	testFixture.set({
-		...testFixture.get(),
-		requests: {
-			...testFixture.get().requests,
-			'job:0': { ...testFixture.get().requests!['job:0']!, operation: null },
-		},
-	});
-	const recovered = recover(testFixture.get());
-	expect(recovered.job?.completed).toBe(2);
-	expect(recovered.library.games[0]?.tags).toEqual(['Recovered']);
-	expect(recovered.library.games[2]?.reviewed).toBe(false);
-	expect(
-		Object.values(recovered.requests ?? {}).every(
-			(paid) => paid.flight === null,
-		),
-	).toBe(true);
-	expect(() => unlocked(recovered)).not.toThrow();
-});
-it('replays without a journal using atomic persisted index, preserving tag edits', async () => {
-	const testFixture = fixture();
-	const classify = testFixture.operations.classify;
-	testFixture.operations.classify = (input) =>
-		Effect.gen(function* () {
-			const state = yield* classify(input);
-			if (input.appid === 1)
-				return yield* Effect.fail(new HttpError(409, 'journal lost'));
-			return state;
-		});
-	await expect(run('job', testFixture.operations)).rejects.toThrow(
-		'journal lost',
+		}),
 	);
-	expect(testFixture.get().job?.completed).toBe(1);
-	testFixture.set({
-		...testFixture.get(),
-		job: { ...testFixture.get().job!, status: 'running' },
-		library: {
-			...testFixture.get().library,
-			games: testFixture.get().library.games.map((game) => ({
-				...game,
-				tags: [...game.tags, 'Edited'],
-			})),
-		},
+	const running = run('job', test.operations);
+	const rejected = expect(running).rejects.toThrow('Paid outcome uncertain');
+	await Promise.all(entered.map((item) => item.promise));
+	release[0]!.open();
+	release[2]!.open();
+	expect((await test.get()).job?.status).toBe('running');
+	await expect(
+		Effect.runPromise(test.store.recoverRequests('recover')),
+	).rejects.toThrow('active');
+	release[1]!.open();
+	await rejected;
+	expect(test.calls).toEqual([1, 2, 3]);
+	expect((await test.get()).job).toMatchObject({
+		status: 'failed',
+		completed: 1,
 	});
-	testFixture.operations.classify = classify;
-	await run('job', testFixture.operations);
-	expect(testFixture.calls()).toBe(2);
-	expect(testFixture.get().job?.status).toBe('complete');
-	expect(testFixture.get().library.games[1]?.tags).toEqual([
+	expect((await test.get()).library.games[1]?.reviewed).toBe(true);
+	await expect(
+		Effect.runPromise(test.store.claimLibrary('replace')),
+	).rejects.toThrow('uncertain');
+	await Effect.runPromise(test.store.recoverRequests('recover'));
+	expect(await Effect.runPromise(test.store.getRequest('job:0'))).toBeNull();
+	expect(await Effect.runPromise(test.store.getRequest('job:2'))).toBeNull();
+	expect(await Effect.runPromise(test.store.getRequest('job:1'))).toMatchObject(
+		{ completed: true },
+	);
+	await Effect.runPromise(test.store.claimLibrary('replace'));
+});
+
+it('journal failure after an atomic save cannot charge completed games or overwrite tag edits on replay', async () => {
+	const test = await fixture();
+	const classify = test.operations.classify;
+	test.operations.classify = (input) =>
+		classify(input).pipe(
+			Effect.andThen(
+				input.appid === 1
+					? Effect.fail(new HttpError(409, 'journal lost'))
+					: Effect.void,
+			),
+		);
+	await expect(run('job', test.operations)).rejects.toThrow('journal lost');
+	expect((await test.get()).job?.completed).toBe(2);
+	test.sqlite.exec("UPDATE classification_jobs SET status='running'");
+	await Effect.runPromise(test.store.saveTags({ appid: 1, tags: ['Edited'] }));
+	test.operations.classify = classify;
+	await run('job', test.operations);
+	expect(test.calls).toHaveLength(2);
+	expect((await test.get()).job).toMatchObject({
+		status: 'complete',
+		completed: 2,
+	});
+	expect((await Effect.runPromise(test.store.getGame(1)))?.game.tags).toEqual([
 		'Edited',
-		'Action',
 	]);
 });
-it('cancels at next boundary after saving the in-flight game', async () => {
-	const testFixture = fixture();
-	const classify = testFixture.operations.classify;
-	testFixture.operations.classify = (input) =>
-		Effect.gen(function* () {
-			testFixture.set({
-				...testFixture.get(),
-				job: { ...testFixture.get().job!, cancel: true },
-			});
-			return yield* classify(input);
-		});
-	await run('job', testFixture.operations);
-	expect(testFixture.calls()).toBe(1);
-	expect(testFixture.get().job?.status).toBe('cancelled');
-	expect(testFixture.get().job?.completed).toBe(1);
+
+it('active jobs block recovery; a terminal delayed workflow cannot charge or change a newer job', async () => {
+	const test = await fixture();
+	await expect(
+		Effect.runPromise(test.store.recoverRequests('recover')),
+	).rejects.toThrow('active');
+	await expect(
+		Effect.runPromise(test.store.claimLibrary('replace')),
+	).rejects.toThrow('active');
+	await Effect.runPromise(test.store.failJob('job', 'Stopped'));
+	await run('job', test.operations);
+	expect(test.calls).toEqual([]);
+	await Effect.runPromise(
+		test.store.startJob('new', {
+			steamId: null,
+			search: '',
+			category: '',
+			all: true,
+		}),
+	);
+	await expect(run('job', test.operations)).rejects.toThrow('Job missing');
+	expect((await test.get()).job).toMatchObject({ id: 'new', status: 'queued' });
 });
-it('failed step preserves uncertain flight and requires consent recovery', async () => {
-	const testFixture = fixture();
-	testFixture.operations.classify = (input) =>
-		Effect.gen(function* () {
-			testFixture.set({ ...testFixture.get(), flight: input });
-			return yield* Effect.fail(new HttpError(409, 'provider lost'));
-		});
-	await expect(run('job', testFixture.operations)).rejects.toThrow();
-	expect(testFixture.get().job?.status).toBe('failed');
-	expect(() => unlocked(testFixture.get())).toThrow('uncertain');
-	expect(recover(testFixture.get()).flight).toBe(null);
-});
-it('active job blocks recovery and mutation, terminal delayed workflow cannot charge', async () => {
-	const testFixture = fixture();
-	expect(() => unlocked(testFixture.get())).toThrow('active');
-	expect(() => recover(testFixture.get())).toThrow('active');
-	testFixture.set({
-		...testFixture.get(),
-		job: { ...testFixture.get().job!, status: 'failed' },
-	});
-	await run('job', testFixture.operations);
-	expect(testFixture.calls()).toBe(0);
-});
-it('creation failure checks deterministic instance before propagating, accepting lost responses', async () => {
-	const ids: string[] = [];
-	const createError = new Error('create lost');
+
+it('creation failure checks the deterministic instance, accepting a lost response without duplicate creation', async () => {
+	const ids: string[] = [],
+		createError = new Error('create lost');
 	const binding = {
 		create: async ({ id }: { id: string }) => {
 			ids.push(id);
