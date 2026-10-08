@@ -41,6 +41,7 @@ export default Alchemy.Stack(
 		const site = yield* Cloudflare.Website.Foldkit('Web', {
 			rootDir: './web',
 			main: 'server/worker.ts',
+			domain: 'steam-organizer.carneloot.com',
 			compatibility: { date: '2026-10-07', flags: ['nodejs_compat'] },
 			assets: { runWorkerFirst: true },
 			access: {

@@ -46,7 +46,7 @@ The [Deploy workflow](.github/workflows/deploy.yml) runs on pushes to `main` or 
 
 Configure deployment before merging the workflow:
 
-1. Configure a Cloudflare account and Zero Trust organization. Enable the account's Workers subdomain.
+1. Configure a Cloudflare account and Zero Trust organization. Enable the account's Workers subdomain and ensure the `carneloot.com` zone is active in that account. The app uses `steam-organizer.carneloot.com` as its canonical hostname; Alchemy attaches the Worker custom domain and Cloudflare manages its DNS record and TLS certificate. The existing Access application also protects the custom domain.
 2. Create a 1Password item named `steam-organizer-github` in the `Secrets` vault with these fields:
 
    | Field                   | Value                                                             |
@@ -57,7 +57,7 @@ Configure deployment before merging the workflow:
    | `TYPESAFE_API_KEY`      | The server-side TypeSafe API key                                  |
    | `ACCESS_EMAILS`         | Comma-separated explicit email addresses for you and your friends |
 
-3. Grant the Cloudflare token edit permissions for Workers Scripts, D1, Access Apps and Policies, Access Identity Providers, and Account Secrets Store. The state store also uses Workers and Secrets Store permissions.
+3. Grant the Cloudflare token edit/write permissions for Workers Scripts, D1, Access: Apps and Policies, Access: Organizations, Identity Providers, and Groups, and Secrets Store. Add Zone Read scoped to `carneloot.com` for automatic domain lookup. Scope the token to the target account and zone. Worker custom-domain attachment does not require separate DNS Edit or Workers Routes Edit permissions.
 4. Give a 1Password service account read access to the item. Store its token as the GitHub repository secret `OP_SERVICE_ACCOUNT_TOKEN` so same-repository PR plans can use it. Create a GitHub environment named `production`, restrict it to `main`, and add required reviewers if you want approval before deployment. You can override the repository token with an environment secret of the same name for deployment.
 
 The workflows use `1password/load-secrets-action@v5`, matching `bg3-equipment-guide`. Each field resolves from `op://Secrets/steam-organizer-github/<field>`. Resolved values are passed only to deployment, planning, and comment redaction steps, not exported globally. No Cloudflare profile or additional state password is required.
@@ -74,7 +74,7 @@ Fork PRs are skipped. Same-repository PR authors must be trusted with the produc
 
 Cloudflare permits one email PIN identity provider per scope. If an existing provider is not owned by this stack, resolve its reuse or adoption before the first deployment. The workflow does not pass `--adopt` automatically.
 
-Do not deploy `web/wrangler.local.jsonc`; it is exclusively for the emulator. Add friends by updating the 1Password `ACCESS_EMAILS` field and running Deploy on `main`. The workflow provisions resources on the first run without requiring an existing hostname. It does not copy the reference project's public-page health check or Worker-only rollback, which would not verify this Access-protected app or roll back its D1 migrations.
+Do not deploy `web/wrangler.local.jsonc`; it is exclusively for the emulator. Add friends by updating the 1Password `ACCESS_EMAILS` field and running Deploy on `main`. The workflow provisions resources and the custom hostname on the first run; the Cloudflare zone must already exist. It does not copy the reference project's public-page health check or Worker-only rollback, which would not verify this Access-protected app or roll back its D1 migrations.
 
 All invited users share the deployed Steam and TypeSafe credentials and their costs. API keys never reach the browser. Classification sends game names, app IDs, descriptions, and your category questions to TypeSafe, not Steam IDs or existing tags. Libraries and category definitions are server-side, not browser-only.
 
