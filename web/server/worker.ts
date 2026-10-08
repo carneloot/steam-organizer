@@ -1,10 +1,11 @@
-import { makeWorkerBridge } from 'alchemy/Cloudflare/Bridge';
+import {
+	makeWorkerBridge,
+	makeWorkflowBridge,
+} from 'alchemy/Cloudflare/Bridge';
 import {
 	DurableObject,
 	WorkerEntrypoint,
 	WorkflowEntrypoint,
-	type WorkflowEvent,
-	type WorkflowStep,
 } from 'cloudflare:workers';
 import { Schema } from 'effect';
 
@@ -17,23 +18,19 @@ import {
 } from './rate-limit.js';
 import { json } from './security.js';
 import { type Env } from './services.js';
-import { runClassification, workflowServices } from './workflow.js';
 
-export class ClassificationWorkflow extends WorkflowEntrypoint<
-	Env,
-	{ owner: string; id: string }
-> {
-	async run(
-		event: WorkflowEvent<{ owner: string; id: string }>,
-		step: WorkflowStep,
-	) {
-		await runClassification(
-			step,
-			event.payload.id,
-			workflowServices(this.env, event.payload.owner),
-		);
-	}
-}
+const meta = {
+	stack: { name: 'steam-organizer', stage: 'production' },
+	entrypoint: Application,
+};
+
+// Keep the deployed class export and binding names while Alchemy owns the runtime.
+export const ClassificationWorkflow = makeWorkflowBridge(
+	// beta.81 types constructor arguments as unknown; Cloudflare narrows the context.
+	WorkflowEntrypoint as Parameters<typeof makeWorkflowBridge>[0],
+	// The shared bridge build supplies Application's provider requirements at runtime.
+	meta as unknown as Parameters<typeof makeWorkflowBridge>[1],
+)('CLASSIFICATION');
 export class ApiCoordinator extends DurableObject<Env> {
 	async fetch(request: Request) {
 		try {
@@ -55,8 +52,4 @@ export class ApiCoordinator extends DurableObject<Env> {
 	}
 }
 
-// Keep the native Workflow and Durable Object exports in the same entry module.
-export default makeWorkerBridge(WorkerEntrypoint, {
-	stack: { name: 'steam-organizer', stage: 'production' },
-	entrypoint: Application,
-});
+export default makeWorkerBridge(WorkerEntrypoint, meta);

@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from '@effect/platform-node';
-import { Console, Effect, FileSystem, Layer, Schema } from 'effect';
+import {
+	Console,
+	Effect,
+	Exit,
+	FileSystem,
+	Layer,
+	Schema,
+	Semaphore,
+} from 'effect';
 import { Argument, Command, Flag } from 'effect/cli';
 import { FetchHttpClient } from 'effect/http';
 import { RateLimiter } from 'effect/persistence';
@@ -313,7 +321,10 @@ const review = Command.make(
 		const steam = yield* Steam;
 		const libraryService = yield* LibraryService;
 		const games = selectGames(initial, search, category, !all);
-		for (const game of games) {
+		const saves = yield* Semaphore.make(1);
+		const classify = Effect.fn('CLI.classifyGame')(function* (
+			game: (typeof games)[number],
+		) {
 			yield* Console.log(
 				`\n${terminalText(game.name)} (${game.appid}) | ${(game.playtime_forever / 60).toFixed(1)}h | ${categories(game).join(', ')}`,
 			);
@@ -322,14 +333,25 @@ const review = Command.make(
 				{ appid: game.appid, name: game.name, description },
 				criteria,
 			);
-			yield* store.modify(file, (library) =>
-				libraryService.updateGame(library, game.appid, (current) => ({
-					...current,
-					tags: [...new Set([...current.tags, ...tags])],
-					reviewed: true,
-				})),
+			yield* saves.withPermit(
+				store.modify(file, (library) =>
+					libraryService.updateGame(library, game.appid, (current) => ({
+						...current,
+						tags: [...new Set([...current.tags, ...tags])],
+						reviewed: true,
+					})),
+				),
 			);
 			yield* Console.log(`Saved Jev tags: ${tags.join(', ') || 'none'}.`);
+		});
+		for (let index = 0; index < games.length; index += 3) {
+			const results = yield* Effect.forEach(
+				games.slice(index, index + 3),
+				(game) => classify(game).pipe(Effect.exit),
+				{ concurrency: 3 },
+			);
+			const failure = results.find(Exit.isFailure);
+			if (failure) return yield* Effect.failCause(failure.cause);
 		}
 		yield* Console.log(
 			`Classified ${games.length} games. Saved games will be skipped next time unless you use --all.`,

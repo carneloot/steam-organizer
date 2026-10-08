@@ -1,9 +1,11 @@
+import { Effect } from 'effect';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Miniflare, Response, convertV4MiniflareOptions } from 'miniflare';
 import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 
 import { buildWorker } from '../../tools/build-worker.js';
+import { Store } from './store.js';
 
 it('Alchemy Effect Worker validates API requests and saves Workflow results without browser polling', async () => {
 	const issuer = 'https://runtime-team.cloudflareaccess.com';
@@ -26,6 +28,8 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 		.sign(privateKey);
 	const bundled = await buildWorker();
 	let calls = 0;
+	let rejectPaidRequests = false;
+	const pending: (() => void)[] = [];
 	const runtime = new Miniflare(
 		convertV4MiniflareOptions({
 			modules: true,
@@ -65,7 +69,11 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 						headers: { 'content-type': 'application/json' },
 					});
 				calls++;
-				await new Promise((resolve) => setTimeout(resolve, 200));
+				if (rejectPaidRequests) return new Response('{}', { status: 401 });
+				await new Promise<void>((resolve) => {
+					pending.push(resolve);
+					if (pending.length === 3) pending.forEach((release) => release());
+				});
 				return new Response(
 					JSON.stringify({ answers: { Puzzle: { type: 'noul', noul: 0.95 } } }),
 					{
@@ -183,6 +191,8 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			text: JSON.stringify([
 				{ appid: 620, name: 'Portal 2', playtime_forever: 400 },
 				{ appid: 400, name: 'Portal', playtime_forever: 0 },
+				{ appid: 401, name: 'Portal companion', playtime_forever: 0 },
+				{ appid: 402, name: 'Portal puzzles', playtime_forever: 0 },
 				{ appid: 9, name: 'Reviewed elsewhere', playtime_forever: 120 },
 			]),
 		});
@@ -197,25 +207,53 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			all: false,
 		});
 		// No further HTTP requests: read persisted state directly while the job runs.
-		let document;
-		for (let attempt = 0; attempt < 150; attempt++) {
-			const row = await db
-				.prepare('SELECT document FROM organizer_state WHERE owner=?')
-				.bind('local@example.test')
-				.first<{ document: string }>();
-			document = JSON.parse(row!.document);
-			if (['complete', 'failed'].includes(document.job?.status)) break;
-			await new Promise((resolve) => setTimeout(resolve, 100));
-		}
-		expect(document.job.status).toBe('complete');
-		expect(document.job.ids).toEqual([400]);
-		expect(document.job.completed).toBe(1);
-		expect(
-			document.library.games.find(
-				(game: { appid: number }) => game.appid === 400,
-			).tags,
-		).toEqual(['Puzzle']);
-		expect(calls).toBe(1);
+		const store = new Store(db, 'local@example.test');
+		const waitForJob = async () => {
+			let { state } = await Effect.runPromise(store.load());
+			for (let attempt = 0; attempt < 150; attempt++) {
+				if (state.job?.status === 'complete' || state.job?.status === 'failed')
+					break;
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				state = (await Effect.runPromise(store.load())).state;
+			}
+			return state;
+		};
+		let document = await waitForJob();
+		expect(document.job?.status).toBe('complete');
+		expect(document.job?.ids).toEqual([400, 401, 402]);
+		expect(document.job?.completed).toBe(3);
+		expect(document.library.games.map((game) => game.tags)).toEqual([
+			[],
+			['Puzzle'],
+			['Puzzle'],
+			['Puzzle'],
+			[],
+		]);
+		expect(calls).toBe(3);
+		rejectPaidRequests = true;
+		await post('classify', {
+			steamId: null,
+			search: 'portal',
+			category: 'unplayed',
+			all: true,
+		});
+		document = await waitForJob();
+		expect(document.job?.status).toBe('failed');
+		expect(document.job?.completed).toBe(0);
+		expect(calls).toBe(6);
+		expect(Object.keys(document.requests ?? {})).toHaveLength(3);
+		for (const [index, appid] of [400, 401, 402].entries())
+			expect(
+				document.requests?.[`${document.job?.id}:${index}`]?.flight?.appid,
+			).toBe(appid);
+		expect(document.library.games.map((game) => game.tags)).toEqual([
+			[],
+			['Puzzle'],
+			['Puzzle'],
+			['Puzzle'],
+			[],
+		]);
+		await post('classify/recover', { confirm: true });
 	} finally {
 		await runtime.dispose();
 	}

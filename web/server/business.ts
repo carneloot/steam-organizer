@@ -21,7 +21,12 @@ import {
 import { HttpError } from './security.js';
 import { type Env } from './services.js';
 import { parseCollections, attachCollections } from './steam-collections.js';
-import { Store, savedCriteria, type Document } from './store.js';
+import {
+	Store,
+	savedCriteria,
+	type Document,
+	type PaidState,
+} from './store.js';
 import { ensureStarted } from './workflow.js';
 
 export const activeJob = (state: Document) =>
@@ -32,12 +37,51 @@ const PaidInput = Schema.Struct({
 	requestId: Schema.String,
 });
 
+function jobIndex(state: Document, requestId: string) {
+	const job = state.job;
+	if (!job) return -1;
+	return job.ids.findIndex(
+		(_appid, index) => requestId === `${job.id}:${index}`,
+	);
+}
+export function paidState(state: Document, requestId: string): PaidState {
+	if (state.requests !== undefined && jobIndex(state, requestId) >= 0)
+		return (
+			state.requests[requestId] ?? {
+				operation: null,
+				flight: null,
+				result: null,
+				completed: null,
+			}
+		);
+	return {
+		operation: state.operation,
+		flight: state.flight,
+		result: state.result,
+		completed: state.completed,
+	};
+}
+function updatePaid(
+	state: Document,
+	requestId: string,
+	paid: PaidState,
+): Document {
+	return state.requests !== undefined && jobIndex(state, requestId) >= 0
+		? { ...state, requests: { ...state.requests, [requestId]: paid } }
+		: { ...state, ...paid };
+}
+
 export function unlocked(state: Document) {
 	if (activeJob(state))
 		throw new HttpError(409, 'A classification job is active.');
-	if (state.operation && state.operation.expiresAt > Date.now())
+	const requests = [state, ...Object.values(state.requests ?? {})];
+	if (
+		requests.some(
+			(paid) => paid.operation && paid.operation.expiresAt > Date.now(),
+		)
+	)
 		throw new HttpError(409, 'An operation is active.');
-	if (state.flight)
+	if (requests.some((paid) => paid.flight))
 		throw new HttpError(
 			409,
 			'Paid outcome uncertain. Confirm recovery before continuing.',
@@ -47,8 +91,23 @@ export function unlocked(state: Document) {
 export function recover(state: Document): Document {
 	if (activeJob(state))
 		throw new HttpError(409, 'A classification job is active.');
-	if (state.operation && state.operation.expiresAt > Date.now())
+	if (
+		[state, ...Object.values(state.requests ?? {})].some(
+			(paid) => paid.operation && paid.operation.expiresAt > Date.now(),
+		)
+	)
 		throw new HttpError(409, 'An operation is active.');
+	for (const [requestId, paid] of Object.entries(state.requests ?? {})) {
+		if (paid.flight && paid.result)
+			state = applyResult(state, requestId, paid.flight.appid);
+		else
+			state = updatePaid(state, requestId, {
+				...paid,
+				operation: null,
+				flight: null,
+				result: null,
+			});
+	}
 	if (state.result && state.flight)
 		return applyResult(state, state.flight.requestId, state.flight.appid);
 	return { ...state, operation: null, flight: null, result: null };
@@ -83,17 +142,18 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 	input: typeof PaidInput.Type,
 ) {
 	let state = (yield* store.load()).state;
-	if (state.completed?.requestId === input.requestId) {
-		if (state.completed.appid !== input.appid)
+	let paidRequest = paidState(state, input.requestId);
+	if (paidRequest.completed?.requestId === input.requestId) {
+		if (paidRequest.completed.appid !== input.appid)
 			return yield* Effect.fail(
 				new HttpError(409, 'Request ID reused for a different game.'),
 			);
 		return state;
 	}
 	if (
-		state.flight?.requestId === input.requestId &&
-		state.result?.requestId === input.requestId &&
-		state.flight.appid === input.appid
+		paidRequest.flight?.requestId === input.requestId &&
+		paidRequest.result?.requestId === input.requestId &&
+		paidRequest.flight.appid === input.appid
 	)
 		return yield* store.modify((current) =>
 			applyResult(current, input.requestId, input.appid),
@@ -105,8 +165,9 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 	const description = yield* steam.fetchGameDescription(input.appid);
 	const operationId = yield* crypto.randomUUIDv4;
 	state = yield* store.modify((current) => {
-		if (current.completed?.requestId === input.requestId) {
-			if (current.completed.appid !== input.appid)
+		const paid = paidState(current, input.requestId);
+		if (paid.completed?.requestId === input.requestId) {
+			if (paid.completed.appid !== input.appid)
 				throw new HttpError(409, 'Request ID reused for a different game.');
 			return current;
 		}
@@ -114,8 +175,9 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 			state.job &&
 			(current.job?.id !== state.job.id ||
 				!activeJob(current) ||
-				input.requestId !== `${current.job.id}:${current.job.completed}` ||
-				current.job.ids[current.job.completed] !== input.appid)
+				current.job.ids[jobIndex(current, input.requestId)] !== input.appid ||
+				(current.requests === undefined &&
+					input.requestId !== `${current.job.id}:${current.job.completed}`))
 		)
 			throw new HttpError(409, 'Job is no longer active at this game.');
 		if (
@@ -123,7 +185,8 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 			!input.requestId.startsWith(`${current.job!.id}:`)
 		)
 			throw new HttpError(409, 'A classification job is active.');
-		unlocked({ ...current, job: null });
+		if (current.job?.cancel) return current;
+		unlocked({ ...current, ...paid, job: null, requests: {} });
 		if (
 			current.library.steamId !== state.library.steamId ||
 			!current.library.games.some(
@@ -133,13 +196,15 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 			)
 		)
 			throw new HttpError(409, 'Library changed. Try again.');
-		return {
-			...current,
+		return updatePaid(current, input.requestId, {
+			...paid,
 			flight: { requestId: input.requestId, appid: input.appid },
 			operation: { id: operationId, expiresAt: Date.now() + 120_000 },
-		};
+		});
 	});
-	if (state.completed?.requestId === input.requestId) return state;
+	paidRequest = paidState(state, input.requestId);
+	if (state.job?.cancel || paidRequest.completed?.requestId === input.requestId)
+		return state;
 	const paid = Effect.gen(function* () {
 		const classifier = yield* Classifier;
 		const tags = yield* classifier.classifyGame(
@@ -147,15 +212,16 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 			input.criteria,
 		);
 		yield* store.modify((current) => {
+			const paid = paidState(current, input.requestId);
 			if (
-				current.operation?.id !== operationId ||
-				current.flight?.requestId !== input.requestId
+				paid.operation?.id !== operationId ||
+				paid.flight?.requestId !== input.requestId
 			)
 				throw new HttpError(409, 'Classification lease lost.');
-			return {
-				...current,
+			return updatePaid(current, input.requestId, {
+				...paid,
 				result: { requestId: input.requestId, appid: input.appid, tags },
-			};
+			});
 		});
 		return yield* store.modify((current) =>
 			applyResult(current, input.requestId, input.appid),
@@ -174,8 +240,11 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
 		Effect.ensuring(
 			store
 				.modify((current) =>
-					current.operation?.id === operationId
-						? { ...current, operation: null }
+					paidState(current, input.requestId).operation?.id === operationId
+						? updatePaid(current, input.requestId, {
+								...paidState(current, input.requestId),
+								operation: null,
+							})
 						: current,
 				)
 				.pipe(Effect.orDie),
@@ -187,22 +256,26 @@ export function applyResult(
 	requestId: string,
 	appid: number,
 ): Document {
+	const paid = paidState(current, requestId);
 	if (
-		current.flight?.requestId !== requestId ||
-		current.flight.appid !== appid ||
-		current.result?.requestId !== requestId ||
-		current.result.appid !== appid
+		paid.flight?.requestId !== requestId ||
+		paid.flight.appid !== appid ||
+		paid.result?.requestId !== requestId ||
+		paid.result.appid !== appid
 	)
 		return current;
-	const tags = current.result.tags;
+	const tags = paid.result.tags;
 	return {
-		...current,
-		flight: null,
-		result: null,
-		operation: null,
-		completed: { requestId, appid },
+		...updatePaid(current, requestId, {
+			operation: null,
+			flight: null,
+			result: null,
+			completed: { requestId, appid },
+		}),
 		...(current.job &&
-		requestId === `${current.job.id}:${current.job.completed}`
+		(current.requests !== undefined ||
+			requestId === `${current.job.id}:${current.job.completed}`) &&
+		current.job.ids[jobIndex(current, requestId)] === appid
 			? {
 					job: {
 						...current.job,
@@ -313,6 +386,7 @@ export const startClassification = Effect.fn('Organizer.startClassification')(
 				throw new HttpError(400, 'Select at most 500 games per job.');
 			return {
 				...state,
+				requests: {},
 				job: {
 					id,
 					ids,
@@ -328,9 +402,7 @@ export const startClassification = Effect.fn('Organizer.startClassification')(
 			};
 		});
 		return respond(
-			yield* Effect.tryPromise(() =>
-				ensureStarted(env.CLASSIFICATION, identity, id),
-			).pipe(
+			yield* ensureStarted(env.CLASSIFICATION, identity, id).pipe(
 				Effect.as(claimed),
 				Effect.catch(() =>
 					store.modify((state) =>

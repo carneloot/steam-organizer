@@ -14,8 +14,20 @@ import { Job } from '../shared.js';
 import { HttpError } from './security.js';
 
 const Flight = Schema.Struct({ requestId: Schema.String, appid: AppId });
+const PaidState = Schema.Struct({
+	operation: Schema.NullOr(
+		Schema.Struct({ id: Schema.String, expiresAt: Schema.Finite }),
+	),
+	flight: Schema.NullOr(Flight),
+	result: Schema.NullOr(
+		Schema.Struct({ ...Flight.fields, tags: Schema.Array(Category) }),
+	),
+	completed: Schema.NullOr(Flight),
+});
+export type PaidState = typeof PaidState.Type;
 export const Document = Schema.Struct({
 	library: Library,
+	requests: Schema.optionalKey(Schema.Record(Schema.String, PaidState)),
 	job: Schema.optionalKey(
 		Schema.NullOr(
 			Schema.Struct({
@@ -30,14 +42,7 @@ export const Document = Schema.Struct({
 	criteriaBySteamId: Schema.optionalKey(
 		Schema.Record(Schema.String, CategoryCriteria),
 	),
-	operation: Schema.NullOr(
-		Schema.Struct({ id: Schema.String, expiresAt: Schema.Finite }),
-	),
-	flight: Schema.NullOr(Flight),
-	result: Schema.NullOr(
-		Schema.Struct({ ...Flight.fields, tags: Schema.Array(Category) }),
-	),
-	completed: Schema.NullOr(Flight),
+	...PaidState.fields,
 });
 export type Document = typeof Document.Type;
 export const initial = (): Document => ({
