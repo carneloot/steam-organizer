@@ -40,6 +40,20 @@ The workflow uses Alchemy's Effect-native `Workflow` and `task` APIs. The custom
 
 Paid requests are not automatically retried. If a provider response is lost, the app blocks further classification until you explicitly clear the uncertain paid lock. Recovery can cause duplicate charges. Starting a new job skips already reviewed games unless you select the option to include them.
 
+## D1 storage
+
+The web app stores one active library per authenticated email. `library_games` has one row per owner and app ID, with game order, playtime, tags, and review status. The same game can have different tags and playtime for different owners.
+
+`libraries` stores the selected Steam ID, revision counter, and legacy paid-request bookkeeping. `category_criteria` stores definitions per owner and Steam ID. `classification_jobs` stores the current or latest job, including its ordered game IDs and category snapshot. `classification_requests` stores individual paid-request claims, saved results, and completion markers for concurrent jobs. Tags, criteria, ordered job IDs, and individual request payloads remain small JSON fields.
+
+The server still assembles a complete library for its existing business logic and API responses. Mutations write only changed rows. Revision-checked D1 batches atomically save game results, job progress, and request markers. Competing writes retry against a fresh snapshot. JSON backups and the CLI file format are unchanged.
+
+### Initialize the database
+
+This personal project's application data is disposable. `web/migrations/0001_state.sql` defines the current relational schema directly. There is no backfill from the previous JSON-document schema.
+
+For a fresh local database, run `npm run web:db`. Existing databases using the old schema must be reset before deploying the matching Worker. Reapplying the command does not update a database that already recorded `0001_state.sql` as applied. Stop classification jobs and wait for paid requests to settle before resetting a database, so a reset does not erase in-flight request records. Database resets and deployments are separate, explicit operations.
+
 ## Deploy privately with Alchemy
 
 Deployment provisions a Worker, D1, a rate-limit Durable Object, a Workflow, and Cloudflare Access with email PIN login. Allowlists protect the app, API, and preview URLs. Each authenticated email owns an isolated library. Entering a Steam ID does not prove Steam ownership; sync requires that account's game details to be public.

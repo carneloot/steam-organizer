@@ -1,0 +1,55 @@
+import { readFileSync } from 'node:fs';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { afterEach } from 'vitest';
+
+const databases: DatabaseSync[] = [];
+afterEach(() => {
+	for (const database of databases.splice(0)) database.close();
+});
+
+// Execute real SQL rather than teaching a fake about each production query.
+export function testDb() {
+	const sqlite = new DatabaseSync(':memory:');
+	databases.push(sqlite);
+	sqlite.exec(readFileSync('web/migrations/0001_state.sql', 'utf8'));
+	const execute = new WeakMap<object, () => unknown>();
+	const db = {
+		prepare: (sql: string) => {
+			let values: SQLInputValue[] = [];
+			const run = () => {
+				const statement = sqlite.prepare(sql);
+				const reads = statement.columns().length > 0;
+				const results = reads ? statement.all(...values) : [];
+				const changes = reads ? 0 : Number(statement.run(...values).changes);
+				return { results, success: true, meta: { changes } };
+			};
+			const statement = {
+				bind(...args: SQLInputValue[]) {
+					values = args;
+					return this;
+				},
+				run: async () => run(),
+				all: async () => run(),
+				first: async () => run().results[0] ?? null,
+			};
+			execute.set(statement, run);
+			return statement;
+		},
+		batch: async (statements: object[]) => {
+			sqlite.exec('BEGIN');
+			try {
+				const results = statements.map((statement) => {
+					const run = execute.get(statement);
+					if (!run) throw new Error('Unknown statement');
+					return run();
+				});
+				sqlite.exec('COMMIT');
+				return results;
+			} catch (error) {
+				sqlite.exec('ROLLBACK');
+				throw error;
+			}
+		},
+	} as unknown as D1Database;
+	return { db, sqlite };
+}

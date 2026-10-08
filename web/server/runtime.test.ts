@@ -85,9 +85,13 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 	);
 	try {
 		const db = await runtime.getD1Database('DB');
-		await db
-			.prepare(await readFile('web/migrations/0001_state.sql', 'utf8'))
-			.run();
+		const sql = await readFile('web/migrations/0001_state.sql', 'utf8');
+		await db.batch(
+			sql
+				.split(';')
+				.filter((statement) => statement.trim())
+				.map((statement) => db.prepare(statement)),
+		);
 		const jwtHeaders = {
 			'cf-access-jwt-assertion': token,
 			'cf-access-authenticated-user-email': 'attacker@example.test',
@@ -116,9 +120,9 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			},
 		);
 		expect(imported.status).toBe(200);
-		expect(
-			await db.prepare('SELECT owner FROM organizer_state').all(),
-		).toMatchObject({ results: [{ owner: 'runtime@example.test' }] });
+		expect(await db.prepare('SELECT owner FROM libraries').all()).toMatchObject(
+			{ results: [{ owner: 'runtime@example.test' }] },
+		);
 		const anonymousPage = await runtime.dispatchFetch(
 			'https://not-local.test/',
 			{

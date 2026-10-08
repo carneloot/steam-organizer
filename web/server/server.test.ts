@@ -13,6 +13,7 @@ import { authorize, readBody, HttpError } from './security.js';
 import { type Env } from './services.js';
 import { parseCollections, attachCollections } from './steam-collections.js';
 import { initial, savedCriteria, Store, type Document } from './store.js';
+import { testDb } from './test-db.js';
 import { reconcile } from './workflow.js';
 
 const mutate = Effect.fnUntraced(function* (
@@ -327,35 +328,7 @@ const steamLayer = Layer.merge(
 	),
 );
 function fakeDb(): D1Database {
-	const rows = new Map<string, { document: string; revision: number }>();
-	return {
-		prepare: (sql: string) => {
-			let values: unknown[] = [];
-			return {
-				bind(...args: unknown[]) {
-					values = args;
-					return this;
-				},
-				first: async () => rows.get(String(values[0])) ?? null,
-				run: async () => {
-					if (sql.startsWith('INSERT')) {
-						const owner = String(values[0]);
-						if (!rows.has(owner))
-							rows.set(owner, { document: String(values[1]), revision: 0 });
-					}
-					if (sql.startsWith('UPDATE')) {
-						const row = rows.get(String(values[1]));
-						if (row && row.revision === values[2]) {
-							row.document = String(values[0]);
-							row.revision++;
-							return { meta: { changes: 1 } };
-						}
-					}
-					return { meta: { changes: 0 } };
-				},
-			};
-		},
-	} as unknown as D1Database;
+	return testDb().db;
 }
 it.effect(
 	'concurrent same request charges once, preserves edits, and replays completed state',
