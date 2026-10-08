@@ -70,6 +70,8 @@ The [Alchemy Production Plan workflow](.github/workflows/alchemy-plan.yml) follo
 
 The workflow uses Alchemy's structured `Stack.plan` API without applying the plan. It disables state-store updates, so the Cloudflare-backed state store must already be bootstrapped through an authorized deployment before PR planning can succeed. Planning still evaluates PR code and contacts Cloudflare; it is not an offline diff. Raw logs and resource properties are excluded from comments, and configured secrets and allowlisted emails are redacted.
 
+Planning logs show Cloudflare API methods, sanitized route templates, and HTTP statuses for each attempt, including retries. Resource identifiers, query strings, headers, and bodies are omitted. Transport failures are logged without their error payloads. These diagnostics do not read response bodies, so an HTTP 200 response containing an API-level error still appears as HTTP 200; use it alongside the final Alchemy error. Diagnostic logs remain in the workflow run, not the PR comment.
+
 Fork PRs are skipped. Same-repository PR authors must be trusted with the production credentials because their code runs in the planning job. The plan job does not use the `production` environment restricted to `main`; it needs the repository-level 1Password token described above. Production deployment still uses the protected environment.
 
 Cloudflare permits one email PIN identity provider per scope. If an existing provider is not owned by this stack, resolve its reuse or adoption before the first deployment. The workflow does not pass `--adopt` automatically.

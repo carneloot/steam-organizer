@@ -1,6 +1,8 @@
 import * as Alchemist from 'alchemy/Alchemist';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 import { writeFile } from 'node:fs/promises';
+
+import { cloudflarePlanDiagnostics } from './cloudflare-plan-diagnostics.js';
 
 const [outputPath] = process.argv.slice(2);
 if (!outputPath) throw new Error('Usage: write-alchemy-plan.ts <output-path>');
@@ -12,7 +14,13 @@ const snapshot = await Effect.runPromise(
 		target: { entrypoint: 'alchemy.run.ts', stage: 'production' },
 		operation: 'deploy',
 		updateStateStore: false,
-	}).pipe(Effect.provide(Alchemist.layer()), Effect.scoped, Effect.orDie),
+	}).pipe(
+		Effect.provide(
+			cloudflarePlanDiagnostics.pipe(Layer.provideMerge(Alchemist.layer())),
+		),
+		Effect.scoped,
+		Effect.orDie,
+	),
 );
 
 // Keep resource properties and outputs out of the comment snapshot.
