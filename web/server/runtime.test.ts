@@ -1,3 +1,4 @@
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Miniflare, Response, convertV4MiniflareOptions } from 'miniflare';
 import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
@@ -5,6 +6,24 @@ import { expect, it } from 'vitest';
 import { buildWorker } from '../../tools/build-worker.js';
 
 it('Alchemy Effect Worker validates API requests and saves Workflow results without browser polling', async () => {
+	const issuer = 'https://runtime-team.cloudflareaccess.com';
+	const audience = 'runtime-access-application';
+	const { publicKey, privateKey } = await generateKeyPair('RS256', {
+		extractable: true,
+	});
+	const jwk = {
+		...(await exportJWK(publicKey)),
+		kid: 'runtime',
+		alg: 'RS256',
+		use: 'sig',
+	};
+	const token = await new SignJWT({ email: ' Runtime@Example.Test ' })
+		.setProtectedHeader({ alg: 'RS256', kid: 'runtime' })
+		.setIssuer(issuer)
+		.setAudience(audience)
+		.setSubject('runtime-user')
+		.setExpirationTime('5m')
+		.sign(privateKey);
 	const bundled = await buildWorker();
 	let calls = 0;
 	const runtime = new Miniflare(
@@ -13,7 +32,18 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			script: String(bundled.files[0].content),
 			compatibilityDate: '2026-10-07',
 			compatibilityFlags: ['nodejs_compat'],
-			bindings: { LOCAL_DEV: 'true', TYPESAFE_API_KEY: 'fake-test-key' },
+			bindings: {
+				LOCAL_DEV: 'true',
+				TYPESAFE_API_KEY: 'fake-test-key',
+				ACCESS_TEAM_DOMAIN: issuer,
+				ACCESS_AUD: audience,
+			},
+			serviceBindings: {
+				ASSETS: async () =>
+					new Response('<main>Steam Organizer assets</main>', {
+						headers: { 'content-type': 'text/html' },
+					}),
+			},
 			d1Databases: ['DB'],
 			durableObjects: {
 				COORDINATOR: { className: 'ApiCoordinator', useSQLite: true },
@@ -25,6 +55,11 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 				},
 			},
 			outboundService: async (request) => {
+				if (request.url === `${issuer}/cdn-cgi/access/certs`) {
+					return new Response(JSON.stringify({ keys: [jwk] }), {
+						headers: { 'content-type': 'application/json' },
+					});
+				}
 				if (new URL(request.url).hostname !== 'api.typesafe.ai')
 					return new Response('{}', {
 						headers: { 'content-type': 'application/json' },
@@ -45,6 +80,46 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 		await db
 			.prepare(await readFile('web/migrations/0001_state.sql', 'utf8'))
 			.run();
+		const jwtHeaders = {
+			'cf-access-jwt-assertion': token,
+			'cf-access-authenticated-user-email': 'attacker@example.test',
+		};
+		const page = await runtime.dispatchFetch('https://not-local.test/', {
+			headers: jwtHeaders,
+		});
+		expect(page.status).toBe(200);
+		expect(await page.text()).toBe('<main>Steam Organizer assets</main>');
+		const imported = await runtime.dispatchFetch(
+			'https://not-local.test/api/import',
+			{
+				method: 'POST',
+				headers: {
+					...jwtHeaders,
+					origin: 'https://not-local.test',
+					'content-type': 'application/json',
+					'x-requested-with': 'steam-organizer',
+				},
+				body: JSON.stringify({
+					confirm: true,
+					text: JSON.stringify([
+						{ appid: 1, name: 'JWT owner game', playtime_forever: 0 },
+					]),
+				}),
+			},
+		);
+		expect(imported.status).toBe(200);
+		expect(
+			await db.prepare('SELECT owner FROM organizer_state').all(),
+		).toMatchObject({ results: [{ owner: 'runtime@example.test' }] });
+		const anonymousPage = await runtime.dispatchFetch(
+			'https://not-local.test/',
+			{
+				headers: {
+					'cf-access-authenticated-user-email': 'attacker@example.test',
+				},
+			},
+		);
+		expect(anonymousPage.status).toBe(403);
 		const mutationHeaders = {
 			origin: 'http://localhost',
 			'content-type': 'application/json',

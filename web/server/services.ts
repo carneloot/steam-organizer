@@ -15,6 +15,8 @@ export interface Env {
 	STEAM_API_KEY?: string;
 	TYPESAFE_API_KEY?: string;
 	LOCAL_DEV?: string;
+	ACCESS_TEAM_DOMAIN?: string;
+	ACCESS_AUD?: string;
 	ASSETS: Fetcher;
 }
 export function services(env: Env) {

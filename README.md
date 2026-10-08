@@ -62,6 +62,10 @@ Configure deployment before merging the workflow:
 
 The workflows use `1password/load-secrets-action@v5`, matching `bg3-equipment-guide`. Each field resolves from `op://Secrets/steam-organizer-github/<field>`. Resolved values are passed only to deployment, planning, and comment redaction steps, not exported globally. No Cloudflare profile or additional state password is required.
 
+Workers serving Static Assets do not receive `ctx.access` through Cloudflare's internal router, even after login. The server therefore verifies `Cf-Access-Jwt-Assertion` against the fixed team issuer and application audience, using Cloudflare's public signing keys. It validates the signature, expiration, and claims before using the email as the library owner. Raw email headers and unsigned tokens are never trusted. Direct invocations with native `ctx.access` continue using that verified identity.
+
+Alchemy derives the server-side verification settings automatically. It reads the existing Zero Trust organization's team domain without changing its settings and binds the protecting Access application's `aud` output to the Worker. The application retains its `Web/Access` resource identity and login policy. No extra 1Password fields are needed. Do not add a separate hostname-specific Access application for this domain, since it takes precedence over the Worker-level application and issues tokens with a different audience. Missing or incorrect verification settings fail closed.
+
 Alchemy uses Cloudflare-backed state and the `production` stage, so fresh GitHub runners share the same deployment state. If you already deployed with the previous local-state configuration, migrate that state before enabling CI deployment. Do not discard it or automatically adopt existing resources.
 
 ### Production plans on pull requests

@@ -1,4 +1,10 @@
 import { Schema } from 'effect';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+
+const AccessIdentity = Schema.Struct({ email: Schema.String });
+let accessKeys:
+	| { issuer: string; jwks: ReturnType<typeof createRemoteJWKSet> }
+	| undefined;
 
 export class HttpError extends Error {
 	constructor(
@@ -14,7 +20,7 @@ export const requestError = (error: unknown) =>
 		: new HttpError(400, 'Request failed. Please try again.');
 export async function authorize(
 	request: Request,
-	env: { LOCAL_DEV?: string },
+	env: { LOCAL_DEV?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string },
 	ctx: { access?: { getIdentity(): Promise<{ email?: string } | undefined> } },
 ) {
 	const url = new URL(request.url);
@@ -23,10 +29,37 @@ export async function authorize(
 		['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
 	)
 		return 'local@example.test';
-	if (!ctx.access) throw new HttpError(403, 'Authentication required.');
-	const identity = await ctx.access.getIdentity().catch(() => {
-		throw new HttpError(403, 'Authentication unavailable.');
-	});
+	let identity: { email?: string } | undefined;
+	if (ctx.access) {
+		identity = await ctx.access.getIdentity().catch(() => {
+			throw new HttpError(403, 'Authentication unavailable.');
+		});
+	} else {
+		// Cloudflare's Static Assets router does not forward ctx.access.
+		const token = request.headers.get('cf-access-jwt-assertion');
+		if (!token) throw new HttpError(403, 'Authentication required.');
+		if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD)
+			throw new HttpError(403, 'Authentication unavailable.');
+		try {
+			if (accessKeys?.issuer !== env.ACCESS_TEAM_DOMAIN) {
+				accessKeys = {
+					issuer: env.ACCESS_TEAM_DOMAIN,
+					jwks: createRemoteJWKSet(
+						new URL(`${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`),
+					),
+				};
+			}
+			const { payload } = await jwtVerify(token, accessKeys.jwks, {
+				issuer: env.ACCESS_TEAM_DOMAIN,
+				audience: env.ACCESS_AUD,
+				algorithms: ['RS256'],
+				requiredClaims: ['exp', 'sub'],
+			});
+			identity = Schema.decodeUnknownSync(AccessIdentity)(payload);
+		} catch {
+			throw new HttpError(403, 'Access denied.');
+		}
+	}
 	if (!identity?.email?.trim()) throw new HttpError(403, 'Access denied.');
 	return identity.email.trim().toLowerCase();
 }
