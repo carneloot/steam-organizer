@@ -6,7 +6,7 @@ export default Alchemy.Stack(
 	'steam-organizer',
 	{
 		providers: Cloudflare.providers(),
-		state: Alchemy.localState(),
+		state: Cloudflare.state(),
 	},
 	Effect.gen(function* () {
 		const emails = (yield* Config.String('ACCESS_EMAILS'))

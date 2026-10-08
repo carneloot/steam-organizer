@@ -42,15 +42,31 @@ Paid requests are not automatically retried. If a provider response is lost, the
 
 Deployment provisions a Worker, D1, a rate-limit Durable Object, a Workflow, and Cloudflare Access with email PIN login. Allowlists protect the app, API, and preview URLs. Each authenticated email owns an isolated library. Entering a Steam ID does not prove Steam ownership; sync requires that account's game details to be public.
 
-Configure a Cloudflare account and Zero Trust organization before deploying. Authenticate Alchemy with Cloudflare, following the [Alchemy setup guide](https://alchemy.run). Set `ACCESS_EMAILS` to explicit comma-separated addresses for you and your friends. Supply the two API keys as server-side deployment secrets or environment variables. `.env.sample` lists the names.
+The [Deploy workflow](.github/workflows/deploy.yml) runs on pushes to `main` or a manual dispatch on `main`. Type checks, lint, formatting, tests, and builds must pass before deployment. Deployments use the GitHub `production` environment and run one at a time.
 
-When you are ready to create cloud resources, run:
+Configure deployment before merging the workflow:
 
-```sh
-npm run web:deploy
-```
+1. Configure a Cloudflare account and Zero Trust organization. Enable the account's Workers subdomain.
+2. Create a 1Password item named `steam-organizer-github` in the `Secrets` vault with these fields:
 
-Alchemy state is stored locally in `.alchemy/`. Keep that state backed up and use the same checkout and stage for subsequent deployments. Do not deploy `web/wrangler.local.jsonc`; it is exclusively for the emulator. Add friends by updating `ACCESS_EMAILS` and redeploying.
+   | Field                   | Value                                                             |
+   | ----------------------- | ----------------------------------------------------------------- |
+   | `CLOUDFLARE_ACCOUNT_ID` | The target Cloudflare account ID                                  |
+   | `CLOUDFLARE_API_TOKEN`  | An API token scoped to the target account                         |
+   | `STEAM_API_KEY`         | The server-side Steam API key                                     |
+   | `TYPESAFE_API_KEY`      | The server-side TypeSafe API key                                  |
+   | `ACCESS_EMAILS`         | Comma-separated explicit email addresses for you and your friends |
+
+3. Grant the Cloudflare token edit permissions for Workers Scripts, D1, Access Apps and Policies, Access Identity Providers, and Account Secrets Store. The state store also uses Workers and Secrets Store permissions.
+4. Give a 1Password service account read access to the item. Create a GitHub environment named `production` and store its token there as the secret `OP_SERVICE_ACCOUNT_TOKEN`. Restrict the environment to `main` and add required reviewers if you want approval before deployment.
+
+The workflow uses `1password/load-secrets-action@v5`, matching `bg3-equipment-guide`. Each field resolves from `op://Secrets/steam-organizer-github/<field>`. Only the deploy step receives the resolved values. No Cloudflare profile or additional state password is required.
+
+Alchemy uses Cloudflare-backed state and the `production` stage, so fresh GitHub runners share the same deployment state. If you already deployed with the previous local-state configuration, migrate that state before enabling CI deployment. Do not discard it or automatically adopt existing resources.
+
+Cloudflare permits one email PIN identity provider per scope. If an existing provider is not owned by this stack, resolve its reuse or adoption before the first deployment. The workflow does not pass `--adopt` automatically.
+
+Do not deploy `web/wrangler.local.jsonc`; it is exclusively for the emulator. Add friends by updating the 1Password `ACCESS_EMAILS` field and running Deploy on `main`. The workflow provisions resources on the first run without requiring an existing hostname. It does not copy the reference project's public-page health check or Worker-only rollback, which would not verify this Access-protected app or roll back its D1 migrations.
 
 All invited users share the deployed Steam and TypeSafe credentials and their costs. API keys never reach the browser. Classification sends game names, app IDs, descriptions, and your category questions to TypeSafe, not Steam IDs or existing tags. Libraries and category definitions are server-side, not browser-only.
 
