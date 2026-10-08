@@ -34,9 +34,9 @@ Use **Category criteria** to edit classification questions or import a criteria 
 
 ## Background classification
 
-**Classify** submits the current search and category filter to a Cloudflare Workflow. Jobs snapshot category definitions and process at most 500 games, in batches of up to three concurrent games. The Workflow saves each game's results in D1 and continues after the tab closes. Reopening the app loads saved progress. **Cancel job** prevents new paid requests and preserves results from requests already in flight. Jobs started before concurrent classification was added finish sequentially.
+**Classify** submits the current search and category filter to a Cloudflare Workflow. Jobs snapshot category definitions and process at most 500 games, in batches of up to three concurrent games. The Workflow saves each game's results in D1 and continues after the tab closes. Reopening the app loads saved progress. **Cancel job** prevents new paid requests and preserves results from requests already in flight.
 
-The workflow uses Alchemy's Effect-native `Workflow` and `task` APIs. The custom Worker entry exports Alchemy's workflow bridge as `ClassificationWorkflow`, retaining the deployed `CLASSIFICATION` binding. Checkpoint names remain stable so existing jobs can replay saved steps.
+The workflow uses Alchemy's Effect-native `Workflow` and `task` APIs. The custom Worker entry exports Alchemy's workflow bridge as `ClassificationWorkflow`, retaining the deployed `CLASSIFICATION` binding. Each game's completion marker prevents duplicate paid calls when a workflow step replays.
 
 Paid requests are not automatically retried. If a provider response is lost, the app blocks further classification until you explicitly clear the uncertain paid lock. Recovery can cause duplicate charges. Starting a new job skips already reviewed games unless you select the option to include them.
 
@@ -44,9 +44,11 @@ Paid requests are not automatically retried. If a provider response is lost, the
 
 The web app stores one active library per authenticated email. `library_games` has one row per owner and app ID, with game order, playtime, tags, and review status. The same game can have different tags and playtime for different owners.
 
-`libraries` stores the selected Steam ID, revision counter, and legacy paid-request bookkeeping. `category_criteria` stores definitions per owner and Steam ID. `classification_jobs` stores the current or latest job, including its ordered game IDs and category snapshot. `classification_requests` stores individual paid-request claims, saved results, and completion markers for concurrent jobs. Tags, criteria, ordered job IDs, and individual request payloads remain small JSON fields.
+`libraries` stores the selected Steam ID, library revision, and exclusive import/recovery lease. `category_criteria` stores definitions per owner and Steam ID. `classification_jobs` stores the current or latest job, including its ordered game IDs and category snapshot. `classification_requests` stores one row per paid request, with its job ID, app ID, lease, saved tags, and completion flag. Tags, criteria, and ordered job IDs remain small JSON fields.
 
-The server still assembles a complete library for its existing business logic and API responses. Mutations write only changed rows. Revision-checked D1 batches atomically save game results, job progress, and request markers. Competing writes retry against a fresh snapshot. JSON backups and the CLI file format are unchanged.
+The store exposes targeted operations for games, criteria, jobs, and paid requests. Workflow steps read only the job, selected game, or request they need. D1 batches atomically merge saved tags into the current game row, increment job progress, and mark the request complete. Replays leave subsequent manual tag edits untouched. The library revision protects job selection and imports from concurrent library edits; unrelated job and request writes do not use an owner-wide revision check.
+
+Full-library reads are reserved for screen responses, exports, imports/sync, and job selection. Screen responses read only the active account's criteria and omit paid-request bookkeeping. JSON backups and the CLI file format are unchanged.
 
 ### Initialize the database
 

@@ -2,10 +2,10 @@ import { WorkerEnvironment } from 'alchemy/Cloudflare/Workers';
 import { Workflow, task } from 'alchemy/Cloudflare/Workflows';
 import { Effect, Exit } from 'effect';
 
-import { activeJob, classifyOne, paidState } from './business.js';
+import { classifyOne } from './business.js';
 import { HttpError } from './security.js';
 import { services, type Env } from './services.js';
-import { Store } from './store.js';
+import { Store, activeJob } from './store.js';
 
 export type WorkflowServices = ReturnType<typeof workflowServices>;
 const options = {
@@ -29,38 +29,18 @@ export const runClassification = Effect.fn('Classification.runBatch')(
 		const snapshot = yield* task(
 			'snapshot',
 			Effect.gen(function* () {
-				const state = yield* operations.load();
-				if (state.job?.id !== id)
+				const job = yield* operations.getJob();
+				if (job?.id !== id)
 					return yield* Effect.fail(new HttpError(404, 'Job missing.'));
-				return {
-					...state.job,
-					concurrency: state.requests === undefined ? 1 : 3,
-				};
+				return job;
 			}),
 			options,
 		);
-		const concurrency = snapshot.concurrency ?? 1;
+		const concurrency = 3;
 		for (let index = 0; index < snapshot.ids.length; index += concurrency) {
 			const proceed = yield* task(
 				`boundary-${index}`,
-				Effect.gen(function* () {
-					const state = yield* operations.modify((state) => {
-						if (state.job?.id !== id || !activeJob(state)) return state;
-						return {
-							...state,
-							job: {
-								...state.job,
-								status: state.job.cancel ? 'cancelled' : 'running',
-								current: state.job.cancel
-									? null
-									: (state.library.games.find(
-											(game) => game.appid === snapshot.ids[index],
-										)?.name ?? null),
-							},
-						};
-					});
-					return state.job?.id === id && activeJob(state);
-				}),
+				operations.beginBatch(id, snapshot.ids[index]!),
 				options,
 			);
 			if (!proceed) return;
@@ -68,25 +48,15 @@ export const runClassification = Effect.fn('Classification.runBatch')(
 				snapshot.ids.slice(index, index + concurrency),
 				(appid, offset) => {
 					const gameIndex = index + offset;
-					const requestId = `${id}:${gameIndex}`;
 					return task(
 						`game-${gameIndex}-${appid}`,
 						Effect.gen(function* () {
-							const state = yield* operations.load();
-							if (
-								state.job?.id !== id ||
-								!activeJob(state) ||
-								state.job.cancel ||
-								paidState(state, requestId).completed?.requestId ===
-									requestId ||
-								(state.requests === undefined &&
-									state.job.completed > gameIndex)
-							)
-								return;
+							if (!(yield* operations.shouldClassify(id, gameIndex))) return;
 							yield* operations.classify({
+								jobId: id,
+								index: gameIndex,
 								appid,
 								criteria: snapshot.criteria,
-								requestId,
 							});
 						}),
 						options,
@@ -97,24 +67,7 @@ export const runClassification = Effect.fn('Classification.runBatch')(
 			const failure = results.find(Exit.isFailure);
 			if (failure) return yield* Effect.failCause(failure.cause);
 		}
-		yield* task(
-			'finish',
-			operations
-				.modify((state) =>
-					state.job?.id === id && activeJob(state)
-						? {
-								...state,
-								job: {
-									...state.job,
-									status: state.job.cancel ? 'cancelled' : 'complete',
-									current: null,
-								},
-							}
-						: state,
-				)
-				.pipe(Effect.asVoid),
-			options,
-		);
+		yield* task('finish', operations.finishJob(id), options);
 	},
 	(effect, id, operations) =>
 		effect.pipe(
@@ -125,30 +78,22 @@ export const runClassification = Effect.fn('Classification.runBatch')(
 			),
 		),
 );
-export const failJob = Effect.fn('Classification.failJob')(function* (
-	operations: Pick<WorkflowServices, 'modify'>,
+export const failJob = (
+	operations: Pick<WorkflowServices, 'failJob'>,
 	id: string,
-) {
-	yield* operations.modify((state) =>
-		state.job?.id === id && activeJob(state)
-			? {
-					...state,
-					job: {
-						...state.job,
-						status: 'failed',
-						current: null,
-						error:
-							'Classification stopped. Saved results are preserved; recover any uncertain paid request before continuing.',
-					},
-				}
-			: state,
+) =>
+	operations.failJob(
+		id,
+		'Classification stopped. Saved results are preserved; recover any uncertain paid request before continuing.',
 	);
-});
 export function workflowServices(env: Env, owner: string) {
 	const store = new Store(env.DB, owner);
 	return {
-		load: () => store.load().pipe(Effect.map(({ state }) => state)),
-		modify: store.modify,
+		getJob: store.getJob,
+		beginBatch: store.beginBatch,
+		shouldClassify: store.shouldClassify,
+		finishJob: store.finishJob,
+		failJob: store.failJob,
 		classify: (input: Parameters<typeof classifyOne>[1]) =>
 			classifyOne(store, input).pipe(Effect.provide(services(env))),
 	};
@@ -172,11 +117,11 @@ export const reconcile = Effect.fn('Classification.reconcile')(function* (
 	owner: string,
 ) {
 	const operations = workflowServices(env, owner);
-	const state = yield* operations.load();
-	if (!activeJob(state)) return state;
-	const id = state.job!.id;
+	const job = yield* operations.getJob();
+	if (!job || !activeJob(job)) return;
+	const id = job.id;
 	yield* Effect.gen(function* () {
-		if (state.job!.status === 'queued')
+		if (job.status === 'queued')
 			yield* ensureStarted(env.CLASSIFICATION, owner, id);
 		const status = yield* Effect.tryPromise(async () =>
 			(await env.CLASSIFICATION.get(id)).status(),
@@ -185,9 +130,8 @@ export const reconcile = Effect.fn('Classification.reconcile')(function* (
 			yield* failJob(operations, id);
 	}).pipe(
 		Effect.catch(() =>
-			// Release the claim on infrastructure failure; a delayed instance cannot charge a terminal job.
+			// A delayed instance cannot charge a terminal job after infrastructure failure.
 			failJob(operations, id),
 		),
 	);
-	return yield* operations.load();
 });

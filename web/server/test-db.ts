@@ -1,6 +1,18 @@
+import { Effect } from 'effect';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach } from 'vitest';
+
+import { type Library } from '../../src/domain/library.js';
+import { type Store } from './store.js';
+
+export const seedLibrary = Effect.fnUntraced(function* (
+	store: Store,
+	library: Library,
+) {
+	const { revision } = yield* store.claimLibrary('seed');
+	yield* store.replaceLibrary(library, 'seed', revision);
+});
 
 const databases: DatabaseSync[] = [];
 afterEach(() => {

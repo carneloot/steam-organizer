@@ -105,9 +105,8 @@ export const apiHandler = (env: Env, identity: string) =>
 					'GET',
 					'/api/state',
 					Effect.gen(function* () {
-						const state = yield* reconcile(env, identity).pipe(
-							Effect.mapError(requestError),
-						);
+						yield* reconcile(env, identity).pipe(Effect.mapError(requestError));
+						const state = yield* new Store(env.DB, identity).getView();
 						return HttpServerResponse.fromWeb(
 							json(Business.stateResponse(state, env, identity)),
 						);
@@ -117,8 +116,8 @@ export const apiHandler = (env: Env, identity: string) =>
 					'GET',
 					'/api/backup',
 					Effect.gen(function* () {
-						const { state } = yield* new Store(env.DB, identity).load();
-						return HttpServerResponse.fromWeb(json(state.library));
+						const library = yield* new Store(env.DB, identity).getLibrary();
+						return HttpServerResponse.fromWeb(json(library));
 					}),
 				);
 				yield* router.add(
@@ -134,19 +133,16 @@ export const apiHandler = (env: Env, identity: string) =>
 							return yield* Effect.fail(
 								new HttpError(400, 'Unknown export format.'),
 							);
-						const { state } = yield* new Store(env.DB, identity).load();
-						return HttpServerResponse.text(
-							exportLibrary(state.library, format),
-							{
-								headers: {
-									'content-type':
-										format === 'csv' ? 'text/csv' : 'application/json',
-									'cache-control': 'no-store',
-									'content-disposition': `attachment; filename="steam-library.${format}"`,
-									'x-content-type-options': 'nosniff',
-								},
+						const library = yield* new Store(env.DB, identity).getLibrary();
+						return HttpServerResponse.text(exportLibrary(library, format), {
+							headers: {
+								'content-type':
+									format === 'csv' ? 'text/csv' : 'application/json',
+								'cache-control': 'no-store',
+								'content-disposition': `attachment; filename="steam-library.${format}"`,
+								'x-content-type-options': 'nosniff',
 							},
-						);
+						});
 					}),
 				);
 				yield* router.add(

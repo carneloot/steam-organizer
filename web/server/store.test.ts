@@ -2,9 +2,10 @@ import { expect, it } from '@effect/vitest';
 import { Effect, Exit } from 'effect';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { readFile } from 'node:fs/promises';
+import { vi } from 'vitest';
 
-import { initial, Store, type Document, type PaidState } from './store.js';
-import { testDb } from './test-db.js';
+import { Store } from './store.js';
+import { seedLibrary, testDb } from './test-db.js';
 
 const games = [
 	{
@@ -17,219 +18,364 @@ const games = [
 	},
 	{ appid: 9, name: 'Nine', playtime_forever: 0, tags: [], reviewed: false },
 ] as const;
-const job = {
-	id: 'job',
-	status: 'running' as const,
-	total: 2,
-	completed: 0,
-	current: 'Portal 2',
-	error: null,
-	steamId: null,
-	ids: [620, 9],
-	criteria: { Puzzle: 'Puzzles' },
-	cancel: false,
+const library = { version: 1 as const, steamId: null, games };
+const selection = { steamId: null, search: '', category: '', all: true };
+const claim = (store: Store, index: number) => {
+	const game = games[index === 0 ? 1 : 0];
+	return store.claimRequest({
+		jobId: 'job',
+		index,
+		appid: game.appid,
+		name: game.name,
+		steamId: null,
+		operationId: `lease-${index}`,
+	});
 };
-const emptyPaid: PaidState = {
-	operation: null,
-	flight: null,
-	result: null,
-	completed: null,
-};
-const legacy: Document = {
-	...initial(),
-	library: { version: 1, steamId: '76561198000000001', games },
-	job,
-	criteriaBySteamId: {
-		offline: { Offline: 'Local' },
-		'76561198000000001': { Puzzle: 'Saved definition' },
-	},
-	operation: { id: 'lease', expiresAt: 123456 },
-	flight: { requestId: 'paid', appid: 620 },
-	result: { requestId: 'paid', appid: 620, tags: ['Puzzle'] },
-	completed: { requestId: 'earlier', appid: 9 },
-};
-const concurrent: Document = {
-	...initial(),
-	library: { version: 1, steamId: null, games: [games[1], games[0]] },
-	job: { ...job, completed: 1, cancel: true, error: 'Interrupted' },
-	requests: {
-		'job:0': { ...emptyPaid, completed: { requestId: 'job:0', appid: 620 } },
-		'job:1': {
-			...emptyPaid,
-			flight: { requestId: 'job:1', appid: 9 },
-			result: { requestId: 'job:1', appid: 9, tags: ['Saved'] },
-		},
-		uncertain: {
-			...emptyPaid,
-			operation: { id: 'other-lease', expiresAt: 999999 },
-			flight: { requestId: 'uncertain', appid: 9 },
-		},
-	},
-};
+const fixture = Effect.fnUntraced(function* () {
+	const { db, sqlite } = testDb();
+	const store = new Store(db, 'owner');
+	yield* seedLibrary(store, library);
+	yield* store.saveCriteria({ steamId: null, criteria: { Puzzle: 'Puzzles' } });
+	yield* store.startJob('job', selection);
+	return { db, sqlite, store };
+});
 
 it.effect(
-	'round-trips state fields, order, owners and absent versus empty ledgers',
+	'round-trips ordered games and job snapshots without legacy bookkeeping',
 	() =>
 		Effect.gen(function* () {
-			const { db, sqlite } = testDb();
-			const documents = {
-				legacy,
-				concurrent,
-				empty: { ...initial(), job: null, requests: {}, criteriaBySteamId: {} },
-				absent: initial(),
-			};
-			for (const [owner, document] of Object.entries(documents)) {
-				yield* new Store(db, owner).modify(() => document);
-			}
-			for (const [owner, state] of Object.entries(documents)) {
-				expect(yield* new Store(db, owner).load()).toEqual({
-					revision: 1,
-					state,
-				});
-			}
+			const { store, db, sqlite } = yield* fixture();
+			expect(yield* store.getLibrary()).toEqual(library);
+			expect(yield* store.getGame(620)).toEqual({
+				game: games[0],
+				steamId: null,
+			});
+			expect(yield* store.getGame(999)).toBeNull();
+			expect(yield* store.getJob()).toEqual({
+				id: 'job',
+				status: 'queued',
+				total: 2,
+				completed: 0,
+				current: null,
+				error: null,
+				steamId: null,
+				ids: [9, 620],
+				criteria: { Puzzle: 'Puzzles' },
+				cancel: false,
+			});
+			expect(yield* store.getRequest('job:0')).toBeNull();
+			expect((yield* new Store(db, 'other').getView()).library.games).toEqual(
+				[],
+			);
 			expect(
-				sqlite
-					.prepare(
-						'SELECT owner,appid,position FROM library_games ORDER BY owner,position',
-					)
-					.all(),
-			).toEqual([
-				{ owner: 'concurrent', appid: 9, position: 0 },
-				{ owner: 'concurrent', appid: 620, position: 1 },
-				{ owner: 'legacy', appid: 620, position: 0 },
-				{ owner: 'legacy', appid: 9, position: 1 },
-			]);
+				sqlite.prepare('SELECT count(*) AS count FROM library_games').get(),
+			).toEqual({ count: 2 });
 		}),
 );
 
 it.effect(
-	'a tag edit writes only that game; job and lease updates do not rewrite games',
+	'screen and library reads omit the ledger; narrow mutations never load the library',
 	() =>
 		Effect.gen(function* () {
-			const { db, sqlite } = testDb();
-			const store = new Store(db, 'owner');
-			yield* store.modify(() => concurrent);
-			sqlite.exec(`CREATE TABLE writes (appid INTEGER);
-			CREATE TRIGGER track_games AFTER UPDATE ON library_games BEGIN INSERT INTO writes VALUES(new.appid); END;`);
-			yield* store.modify((state) => ({
-				...state,
-				library: {
-					...state.library,
-					games: state.library.games.map((game) =>
-						game.appid === 9 ? { ...game, tags: ['Edited'] } : game,
-					),
-				},
-			}));
-			yield* store.modify((state) => ({
-				...state,
-				job: { ...job, completed: 2 },
-				operation: { id: 'claim', expiresAt: 123 },
-			}));
-			expect(sqlite.prepare('SELECT appid FROM writes').all()).toEqual([
-				{ appid: 9 },
-			]);
-			expect((yield* store.load()).state.library.games).toEqual([
-				{ ...games[1], tags: ['Edited'] },
-				games[0],
-			]);
+			const { store, db } = yield* fixture();
+			const prepare = vi.spyOn(db, 'prepare');
+			yield* store.getView();
+			expect(prepare.mock.calls).toHaveLength(4);
+			expect(prepare.mock.calls.map(([sql]) => sql).join('\n')).not.toContain(
+				'classification_requests',
+			);
+			prepare.mockClear();
+			yield* store.getLibrary();
+			expect(prepare.mock.calls).toHaveLength(2);
+			expect(prepare.mock.calls.map(([sql]) => sql).join('\n')).not.toMatch(
+				/classification_|category_criteria/,
+			);
+			prepare.mockClear();
+			yield* store.saveTags({ appid: 9, tags: ['Manual'] });
+			expect(prepare.mock.calls).toHaveLength(2);
+			expect(
+				prepare.mock.calls.every(([sql]) => sql.startsWith('UPDATE')),
+			).toBe(true);
+			prepare.mockClear();
+			yield* store.cancelJob();
+			expect(prepare.mock.calls).toHaveLength(1);
+			expect(prepare.mock.calls[0]?.[0]).toContain(
+				'UPDATE classification_jobs',
+			);
+			prepare.mockRestore();
 		}),
 );
 
 it.effect(
-	'concurrent completions retry stale batches without losing tags, job counts or request markers',
+	'only one competing paid claim succeeds, while different games claim independently',
 	() =>
 		Effect.gen(function* () {
-			const { db } = testDb();
-			const store = new Store(db, 'owner');
-			yield* store.modify(() => ({
-				...initial(),
-				library: { version: 1, steamId: null, games },
-				job,
-				requests: {},
-			}));
-			let updates = 0;
-			yield* Effect.forEach(
-				[620, 9],
-				(appid) =>
-					store.modify((state) => {
-						updates++;
-						return {
-							...state,
-							library: {
-								...state.library,
-								games: state.library.games.map((game) =>
-									game.appid === appid
-										? {
-												...game,
-												tags: [...game.tags, `Tag ${appid}`],
-												reviewed: true,
-											}
-										: game,
-								),
-							},
-							job: { ...job, completed: (state.job?.completed ?? 0) + 1 },
-							requests: {
-								...state.requests,
-								[`job:${appid}`]: {
-									...emptyPaid,
-									completed: { requestId: `job:${appid}`, appid },
-								},
-							},
-						};
-					}),
+			const { store } = yield* fixture();
+			const exits = yield* Effect.forEach(
+				[0, 0],
+				(index) => Effect.exit(claim(store, index)),
 				{ concurrency: 'unbounded' },
 			);
-			const { state, revision } = yield* store.load();
-			expect(updates).toBeGreaterThan(2);
-			expect(revision).toBe(3);
-			expect(state.library.games.map((game) => game.tags)).toEqual([
-				['Custom', 'Tag 620'],
-				['Tag 9'],
-			]);
-			expect(state.job?.completed).toBe(2);
-			expect(state.requests).toEqual({
-				'job:620': {
-					...emptyPaid,
-					completed: { requestId: 'job:620', appid: 620 },
-				},
-				'job:9': { ...emptyPaid, completed: { requestId: 'job:9', appid: 9 } },
+			expect(exits.filter(Exit.isSuccess)).toHaveLength(1);
+			expect(exits.filter(Exit.isFailure)).toHaveLength(1);
+			expect(yield* claim(store, 1)).toBe(true);
+			expect(yield* store.getRequest('job:0')).toMatchObject({
+				appid: 9,
+				operationId: 'lease-0',
+				tags: null,
+				completed: false,
+			});
+			expect(yield* store.getRequest('job:1')).toMatchObject({
+				appid: 620,
+				operationId: 'lease-1',
+				tags: null,
+				completed: false,
 			});
 		}),
 );
 
 it.effect(
-	'failed job persistence rolls back earlier game writes and retains paid results',
+	'identical request IDs remain isolated across owners, including recovery',
 	() =>
 		Effect.gen(function* () {
-			const { db, sqlite } = testDb();
-			const store = new Store(db, 'owner');
-			yield* store.modify(() => concurrent);
-			const before = yield* store.load();
-			sqlite.exec(
-				`CREATE TRIGGER fail_job BEFORE UPDATE ON classification_jobs BEGIN SELECT RAISE(ABORT,'injected failure'); END;`,
-			);
-			const apply = store.modify((state) => ({
-				...state,
-				library: {
-					...state.library,
-					games: [{ ...games[1], tags: ['Applied'], reviewed: true }, games[0]],
-				},
-				job: { ...job, completed: 2 },
-				requests: {
-					'job:1': {
-						...emptyPaid,
-						completed: { requestId: 'job:1', appid: 9 },
-					},
-				},
-			}));
-			expect(Exit.isFailure(yield* Effect.exit(apply))).toBe(true);
-			expect(yield* store.load()).toEqual(before);
-			sqlite.exec('DROP TRIGGER fail_job');
-			yield* apply;
-			expect((yield* store.load()).state).toMatchObject({
-				job: { completed: 2 },
-				requests: { 'job:1': { result: null, completed: { appid: 9 } } },
+			const { store, db } = yield* fixture();
+			const other = new Store(db, 'other');
+			yield* seedLibrary(other, library);
+			yield* other.startJob('job', selection);
+			yield* claim(store, 0);
+			yield* claim(other, 0);
+			yield* store.saveResult('job:0', 'lease-0', ['Private']);
+			yield* store.applyResult('job:0');
+			yield* store.failJob('job', 'Stopped');
+			yield* store.recoverRequests('recover');
+			expect((yield* store.getGame(9))?.game.tags).toEqual(['Private']);
+			expect((yield* other.getGame(9))?.game).toEqual(games[1]);
+			expect((yield* other.getJob())?.completed).toBe(0);
+			expect(yield* other.getRequest('job:0')).toMatchObject({
+				completed: false,
+				tags: null,
+				operationId: 'lease-0',
 			});
+		}),
+);
+
+it.effect('competing job starts atomically admit only one job', () =>
+	Effect.gen(function* () {
+		const { db } = testDb();
+		const store = new Store(db, 'owner');
+		yield* seedLibrary(store, library);
+		const exits = yield* Effect.forEach(
+			['one', 'two'],
+			(id) => Effect.exit(store.startJob(id, selection)),
+			{ concurrency: 'unbounded' },
+		);
+		expect(exits.filter(Exit.isSuccess)).toHaveLength(1);
+		expect(exits.filter(Exit.isFailure)).toHaveLength(1);
+		expect((yield* store.getJob())?.ids).toEqual([9, 620]);
+	}),
+);
+
+it('job selection retries a stale library snapshot rather than selecting games with outdated tags', async () => {
+	const { db } = testDb();
+	const store = new Store(db, 'owner');
+	await Effect.runPromise(
+		seedLibrary(store, {
+			...library,
+			games: games.map((game) => ({ ...game, tags: ['Select'] })),
+		}),
+	);
+	const batch = db.batch.bind(db);
+	let edited = false;
+	db.batch = async <T>(statements: D1PreparedStatement[]) => {
+		const result = await batch<T>(statements);
+		if (!edited) {
+			edited = true;
+			await Effect.runPromise(store.saveTags({ appid: 9, tags: [] }));
+		}
+		return result;
+	};
+	await Effect.runPromise(
+		store.startJob('job', { ...selection, category: 'Select' }),
+	);
+	expect((await Effect.runPromise(store.getJob()))?.ids).toEqual([620]);
+});
+
+it.effect(
+	'out-of-order concurrent applies atomically merge tags, increment progress once and retain completion markers',
+	() =>
+		Effect.gen(function* () {
+			const { store, db } = yield* fixture();
+			yield* claim(store, 0);
+			yield* claim(store, 1);
+			yield* store.saveTags({ appid: 620, tags: ['Z', 'Custom', 'A'] });
+			yield* store.saveResult('job:1', 'lease-1', [
+				'Custom',
+				'M',
+				'Z',
+				'B',
+				'M',
+			]);
+			yield* store.applyResult('job:1');
+			expect((yield* store.getGame(620))?.game.tags).toEqual([
+				'Z',
+				'Custom',
+				'A',
+				'M',
+				'B',
+			]);
+			expect((yield* store.getJob())?.completed).toBe(1);
+			yield* store.saveTags({ appid: 620, tags: ['Edited after completion'] });
+			yield* store.saveResult('job:0', 'lease-0', []);
+			const prepare = vi.spyOn(db, 'prepare');
+			yield* Effect.all(
+				[
+					store.applyResult('job:0'),
+					store.applyResult('job:1'),
+					store.applyResult('job:0'),
+				],
+				{ concurrency: 'unbounded' },
+			);
+			expect(prepare.mock.calls).toHaveLength(12);
+			expect(
+				prepare.mock.calls.every(([sql]) => sql.startsWith('UPDATE')),
+			).toBe(true);
+			prepare.mockRestore();
+			expect((yield* store.getJob())?.completed).toBe(2);
+			expect((yield* store.getGame(9))?.game).toEqual({
+				...games[1],
+				reviewed: true,
+			});
+			expect((yield* store.getGame(620))?.game.tags).toEqual([
+				'Edited after completion',
+			]);
+			for (const id of ['job:0', 'job:1'])
+				expect(yield* store.getRequest(id)).toMatchObject({
+					completed: true,
+					tags: null,
+					operationId: null,
+				});
+		}),
+);
+
+it.effect(
+	'a failed progress write rolls back the game and preserves its paid checkpoint',
+	() =>
+		Effect.gen(function* () {
+			const { store, sqlite } = yield* fixture();
+			yield* claim(store, 0);
+			yield* store.saveResult('job:0', 'lease-0', ['Saved']);
+			sqlite.exec(
+				"CREATE TRIGGER fail_job BEFORE UPDATE ON classification_jobs BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+			);
+			expect(
+				Exit.isFailure(yield* Effect.exit(store.applyResult('job:0'))),
+			).toBe(true);
+			expect((yield* store.getGame(9))?.game).toEqual(games[1]);
+			expect((yield* store.getJob())?.completed).toBe(0);
+			expect(yield* store.getRequest('job:0')).toMatchObject({
+				tags: ['Saved'],
+				completed: false,
+			});
+			sqlite.exec('DROP TRIGGER fail_job');
+			yield* store.applyResult('job:0');
+			expect((yield* store.getGame(9))?.game.tags).toEqual(['Saved']);
+			expect((yield* store.getJob())?.completed).toBe(1);
+		}),
+);
+
+it.effect(
+	'new jobs cannot erase active or uncertain requests; recovery applies saved results and retains completed entries',
+	() =>
+		Effect.gen(function* () {
+			const { store } = yield* fixture();
+			yield* claim(store, 0);
+			yield* claim(store, 1);
+			yield* store.saveResult('job:1', 'lease-1', ['Recovered']);
+			yield* store.failJob('job', 'Stopped');
+			expect(
+				Exit.isFailure(yield* Effect.exit(store.recoverRequests('recover'))),
+			).toBe(true);
+			expect(
+				Exit.isFailure(yield* Effect.exit(store.startJob('new', selection))),
+			).toBe(true);
+			yield* store.releaseRequest('job:0', 'lease-0');
+			yield* store.releaseRequest('job:1', 'lease-1');
+			expect(
+				Exit.isFailure(yield* Effect.exit(store.startJob('new', selection))),
+			).toBe(true);
+			expect(yield* store.getRequest('job:0')).not.toBeNull();
+			yield* store.recoverRequests('recover');
+			expect(yield* store.getRequest('job:0')).toBeNull();
+			expect(yield* store.getRequest('job:1')).toMatchObject({
+				completed: true,
+			});
+			expect((yield* store.getJob())?.completed).toBe(1);
+			expect((yield* store.getGame(620))?.game.tags).toEqual([
+				'Custom',
+				'Recovered',
+			]);
+			yield* store.startJob('new', selection);
+			expect(yield* store.getRequest('job:1')).toBeNull();
+			expect((yield* store.getJob())?.completed).toBe(0);
+		}),
+);
+
+it.effect(
+	'stale or mismatched lease holders cannot save, release or replace another operation',
+	() =>
+		Effect.gen(function* () {
+			const { store } = yield* fixture();
+			yield* claim(store, 0);
+			expect(
+				Exit.isFailure(
+					yield* Effect.exit(store.saveResult('job:0', 'wrong', ['Wrong'])),
+				),
+			).toBe(true);
+			yield* store.releaseRequest('job:0', 'wrong');
+			expect((yield* store.getRequest('job:0'))?.operationId).toBe('lease-0');
+			yield* store.releaseRequest('job:0', 'lease-0');
+			yield* store.failJob('job', 'Stopped');
+			yield* store.recoverRequests('recover');
+			const snapshot = yield* store.claimLibrary('replace');
+			yield* store.releaseLibrary('wrong');
+			expect(
+				Exit.isFailure(yield* Effect.exit(store.claimLibrary('other'))),
+			).toBe(true);
+			expect(
+				Exit.isFailure(
+					yield* Effect.exit(
+						store.replaceLibrary(library, 'wrong', snapshot.revision),
+					),
+				),
+			).toBe(true);
+			yield* store.saveTags({ appid: 9, tags: ['During import'] });
+			expect(
+				Exit.isFailure(
+					yield* Effect.exit(
+						store.replaceLibrary(library, 'replace', snapshot.revision),
+					),
+				),
+			).toBe(true);
+			expect((yield* store.getGame(9))?.game.tags).toEqual(['During import']);
+			yield* store.releaseLibrary('replace');
+		}),
+);
+
+it.effect(
+	'expired requests remain uncertain and block replacement until explicit recovery',
+	() =>
+		Effect.gen(function* () {
+			const { store, sqlite } = yield* fixture();
+			yield* claim(store, 0);
+			yield* store.failJob('job', 'Stopped');
+			sqlite.exec('UPDATE classification_requests SET operation_expires_at=0');
+			expect(Exit.isFailure(yield* Effect.exit(claim(store, 0)))).toBe(true);
+			expect(
+				Exit.isFailure(yield* Effect.exit(store.claimLibrary('replace'))),
+			).toBe(true);
+			yield* store.recoverRequests('recover');
+			expect(yield* store.getRequest('job:0')).toBeNull();
+			yield* store.claimLibrary('replace');
 		}),
 );
 
@@ -237,51 +383,30 @@ it.effect(
 	'large replacements remove obsolete rows, preserve order and isolate owners',
 	() =>
 		Effect.gen(function* () {
-			const { db, sqlite } = testDb();
+			const { db } = testDb();
 			const store = new Store(db, 'owner');
-			yield* store.modify(() => ({
-				...concurrent,
-				criteriaBySteamId: { offline: { Old: 'Replaced' } },
-			}));
-			yield* new Store(db, 'other').modify(() => legacy);
-			const replacement: Document = {
-				...initial(),
-				job: null,
-				requests: {},
-				criteriaBySteamId: {},
-				library: {
-					version: 1,
-					steamId: '76561198000000002',
-					games: Array.from({ length: 1500 }, (_, index) => ({
-						...games[1],
-						appid: 2000 - index,
-						name: `Game ${index}`,
-					})),
-				},
+			const other = new Store(db, 'other');
+			yield* seedLibrary(store, library);
+			yield* seedLibrary(other, library);
+			const replacement = {
+				...library,
+				steamId: '76561198000000002',
+				games: Array.from({ length: 1500 }, (_, i) => ({
+					...games[1],
+					appid: 2000 - i,
+					name: `Game ${i}`,
+				})),
 			};
-			yield* store.modify(() => replacement);
-			expect((yield* store.load()).state).toEqual(replacement);
-			expect((yield* new Store(db, 'other').load()).state).toEqual(legacy);
-			expect(
-				sqlite
-					.prepare(
-						"SELECT count(*) AS count FROM classification_requests WHERE owner='owner'",
-					)
-					.get(),
-			).toEqual({ count: 0 });
-			expect(
-				sqlite
-					.prepare(
-						"SELECT count(*) AS count FROM classification_jobs WHERE owner='owner'",
-					)
-					.get(),
-			).toEqual({ count: 0 });
-			yield* store.modify(() => initial());
-			expect((yield* store.load()).state).toEqual(initial());
+			yield* seedLibrary(store, replacement);
+			expect(yield* store.getLibrary()).toEqual(replacement);
+			expect(yield* store.getGame(9)).toBeNull();
+			expect(yield* other.getLibrary()).toEqual(library);
+			yield* seedLibrary(store, { ...library, games: [] });
+			expect((yield* store.getLibrary()).games).toEqual([]);
 		}),
 );
 
-it('D1 initializes the schema and atomically rolls back multi-table failures', async () => {
+it('actual D1 executes targeted batches and rolls back a failed multi-table apply', async () => {
 	const runtime = new Miniflare(
 		convertV4MiniflareOptions({
 			modules: true,
@@ -299,39 +424,34 @@ it('D1 initializes the schema and atomically rolls back multi-table failures', a
 				.filter((sql) => sql.trim())
 				.map((sql) => db.prepare(sql)),
 		);
-		const store = new Store(db as unknown as D1Database, 'concurrent');
-		await Effect.runPromise(store.modify(() => concurrent));
-		await Effect.runPromise(
-			new Store(db as unknown as D1Database, 'legacy').modify(() => legacy),
-		);
-		expect(await Effect.runPromise(store.load())).toEqual({
-			revision: 1,
-			state: concurrent,
-		});
-		expect(
-			(
-				await Effect.runPromise(
-					new Store(db as unknown as D1Database, 'legacy').load(),
-				)
-			).state,
-		).toEqual(legacy);
+		const store = new Store(db as unknown as D1Database, 'owner');
+		await Effect.runPromise(seedLibrary(store, library));
+		await Effect.runPromise(store.startJob('job', selection));
+		await Effect.runPromise(claim(store, 0));
+		await Effect.runPromise(store.saveResult('job:0', 'lease-0', ['Saved']));
 		await db
 			.prepare(
-				`CREATE TRIGGER fail_metadata BEFORE UPDATE ON libraries BEGIN SELECT RAISE(ABORT,'injected failure'); END`,
+				"CREATE TRIGGER fail_job BEFORE UPDATE ON classification_jobs BEGIN SELECT RAISE(ABORT,'injected failure'); END",
 			)
 			.run();
 		await expect(
-			Effect.runPromise(store.modify(() => legacy)),
+			Effect.runPromise(store.applyResult('job:0')),
 		).rejects.toThrow();
-		expect(await Effect.runPromise(store.load())).toEqual({
-			revision: 1,
-			state: concurrent,
+		expect((await Effect.runPromise(store.getGame(9)))?.game).toEqual(games[1]);
+		expect((await Effect.runPromise(store.getJob()))?.completed).toBe(0);
+		expect(await Effect.runPromise(store.getRequest('job:0'))).toMatchObject({
+			tags: ['Saved'],
+			completed: false,
 		});
-		await db.prepare('DROP TRIGGER fail_metadata').run();
-		await Effect.runPromise(store.modify(() => legacy));
-		expect(await Effect.runPromise(store.load())).toEqual({
-			revision: 2,
-			state: legacy,
+		await db.prepare('DROP TRIGGER fail_job').run();
+		await Effect.runPromise(store.applyResult('job:0'));
+		expect((await Effect.runPromise(store.getGame(9)))?.game.tags).toEqual([
+			'Saved',
+		]);
+		expect((await Effect.runPromise(store.getJob()))?.completed).toBe(1);
+		expect(await Effect.runPromise(store.getRequest('job:0'))).toMatchObject({
+			tags: null,
+			completed: true,
 		});
 	} finally {
 		await runtime.dispose();
