@@ -7,7 +7,9 @@ import { HttpError } from './security.js';
 import { services, type Env } from './services.js';
 import { Store, activeJob } from './store.js';
 
-export type WorkflowServices = ReturnType<typeof workflowServices>;
+export type WorkflowServices = Effect.Success<
+	ReturnType<typeof workflowServices>
+>;
 const options = {
 	retries: { limit: 0, delay: '1 second' },
 	timeout: '2 minutes',
@@ -20,7 +22,10 @@ export class Classification extends Workflow<Classification>()(
 			id: string;
 		}) {
 			const env = (yield* WorkerEnvironment) as Env;
-			yield* runClassification(input.id, workflowServices(env, input.owner));
+			yield* Effect.gen(function* () {
+				const operations = yield* workflowServices(env);
+				yield* runClassification(input.id, operations);
+			}).pipe(Effect.provide(Store.layer(env.DB, input.owner)));
 		}),
 	),
 ) {}
@@ -86,18 +91,23 @@ export const failJob = (
 		id,
 		'Classification stopped. Saved results are preserved; recover any uncertain paid request before continuing.',
 	);
-export function workflowServices(env: Env, owner: string) {
-	const store = new Store(env.DB, owner);
+export const workflowServices = Effect.fn('Classification.services')(function* (
+	env: Env,
+) {
+	const store = yield* Store;
 	return {
 		getJob: store.getJob,
 		beginBatch: store.beginBatch,
 		shouldClassify: store.shouldClassify,
 		finishJob: store.finishJob,
 		failJob: store.failJob,
-		classify: (input: Parameters<typeof classifyOne>[1]) =>
-			classifyOne(store, input).pipe(Effect.provide(services(env))),
+		classify: (input: Parameters<typeof classifyOne>[0]) =>
+			classifyOne(input).pipe(
+				Effect.provideService(Store, store),
+				Effect.provide(services(env)),
+			),
 	};
-}
+});
 export const ensureStarted = Effect.fn('Classification.ensureStarted')(
 	function* (binding: Env['CLASSIFICATION'], owner: string, id: string) {
 		yield* Effect.tryPromise(() =>
@@ -116,7 +126,7 @@ export const reconcile = Effect.fn('Classification.reconcile')(function* (
 	env: Env,
 	owner: string,
 ) {
-	const operations = workflowServices(env, owner);
+	const operations = yield* workflowServices(env);
 	const job = yield* operations.getJob();
 	if (!job || !activeJob(job)) return;
 	const id = job.id;

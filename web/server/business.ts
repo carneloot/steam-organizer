@@ -38,7 +38,7 @@ export const stateResponse = (state: View, env: Env, identity: string) => ({
 		: null,
 	configured: { sync: !!env.STEAM_API_KEY, classify: !!env.TYPESAFE_API_KEY },
 });
-const respond = (store: Store, env: Env, identity: string) =>
+const respond = (store: Store['Service'], env: Env, identity: string) =>
 	store
 		.getView()
 		.pipe(Effect.map((view) => stateResponse(view, env, identity)));
@@ -51,86 +51,79 @@ const parseJson = (text: string) =>
 		Effect.mapError(() => new HttpError(400, 'Invalid JSON import.')),
 	);
 
-export const classifyOne = Effect.fn('Organizer.classifyOne')(function* (
-	store: Pick<
-		Store,
-		| 'getRequest'
-		| 'getGame'
-		| 'claimRequest'
-		| 'saveResult'
-		| 'applyResult'
-		| 'releaseRequest'
-	>,
-	input: {
+export const classifyOne = Effect.fn('Organizer.classifyOne')(
+	function* (input: {
 		jobId: string;
 		index: number;
 		appid: number;
 		criteria: CategoryCriteria;
-	},
-) {
-	const requestId = `${input.jobId}:${input.index}`;
-	const request = yield* store.getRequest(requestId);
-	if (
-		request &&
-		(request.appid !== input.appid || request.jobId !== input.jobId)
-	)
-		return yield* Effect.fail(
-			new HttpError(409, 'Request ID reused for a different game.'),
-		);
-	if (request?.completed) return;
-	if (request?.tags !== null && request?.tags !== undefined)
-		return yield* store.applyResult(requestId);
-	if (request)
-		return yield* Effect.fail(
-			new HttpError(
-				409,
-				request.expiresAt !== null && request.expiresAt > Date.now()
-					? 'An operation is active.'
-					: 'Paid outcome uncertain. Confirm recovery before continuing.',
-			),
-		);
-	const selected = yield* store.getGame(input.appid);
-	if (!selected) return yield* Effect.fail(new HttpError(404, 'Game missing.'));
-	const steam = yield* Steam;
-	const crypto = yield* Crypto.Crypto;
-	const description = yield* steam.fetchGameDescription(input.appid);
-	const operationId = yield* crypto.randomUUIDv4;
-	const claimed = yield* store.claimRequest({
-		...input,
-		name: selected.game.name,
-		steamId: selected.steamId,
-		operationId,
-	});
-	if (!claimed) return yield* store.applyResult(requestId);
-	return yield* Effect.gen(function* () {
-		const classifier = yield* Classifier;
-		const tags = yield* classifier.classifyGame(
-			{ ...selected.game, description },
-			input.criteria,
-		);
-		yield* store.saveResult(requestId, operationId, tags);
-		yield* store.applyResult(requestId);
-	}).pipe(
-		Effect.timeout('45 seconds'),
-		Effect.catchCause(() =>
-			Effect.fail(
+	}) {
+		const store = yield* Store;
+		const requestId = `${input.jobId}:${input.index}`;
+		const request = yield* store.getRequest(requestId);
+		if (
+			request &&
+			(request.appid !== input.appid || request.jobId !== input.jobId)
+		)
+			return yield* Effect.fail(
+				new HttpError(409, 'Request ID reused for a different game.'),
+			);
+		if (request?.completed) return;
+		if (request?.tags !== null && request?.tags !== undefined)
+			return yield* store.applyResult(requestId);
+		if (request)
+			return yield* Effect.fail(
 				new HttpError(
 					409,
-					'Paid outcome uncertain. No request was repeated. Retry the same request to apply a saved result, or confirm recovery.',
+					request.expiresAt !== null && request.expiresAt > Date.now()
+						? 'An operation is active.'
+						: 'Paid outcome uncertain. Confirm recovery before continuing.',
+				),
+			);
+		const selected = yield* store.getGame(input.appid);
+		if (!selected)
+			return yield* Effect.fail(new HttpError(404, 'Game missing.'));
+		const steam = yield* Steam;
+		const crypto = yield* Crypto.Crypto;
+		const description = yield* steam.fetchGameDescription(input.appid);
+		const operationId = yield* crypto.randomUUIDv4;
+		const claimed = yield* store.claimRequest({
+			...input,
+			name: selected.game.name,
+			steamId: selected.steamId,
+			operationId,
+		});
+		if (!claimed) return yield* store.applyResult(requestId);
+		return yield* Effect.gen(function* () {
+			const classifier = yield* Classifier;
+			const tags = yield* classifier.classifyGame(
+				{ ...selected.game, description },
+				input.criteria,
+			);
+			yield* store.saveResult(requestId, operationId, tags);
+			yield* store.applyResult(requestId);
+		}).pipe(
+			Effect.timeout('45 seconds'),
+			Effect.catchCause(() =>
+				Effect.fail(
+					new HttpError(
+						409,
+						'Paid outcome uncertain. No request was repeated. Retry the same request to apply a saved result, or confirm recovery.',
+					),
 				),
 			),
-		),
-		Effect.ensuring(
-			store.releaseRequest(requestId, operationId).pipe(Effect.orDie),
-		),
-	);
-});
+			Effect.ensuring(
+				store.releaseRequest(requestId, operationId).pipe(Effect.orDie),
+			),
+		);
+	},
+);
 
 export const cancelJob = Effect.fn('Organizer.cancelJob')(function* (
 	env: Env,
 	identity: string,
 ) {
-	const store = new Store(env.DB, identity);
+	const store = yield* Store;
 	yield* store.cancelJob();
 	return yield* respond(store, env, identity);
 });
@@ -139,7 +132,7 @@ export const saveCriteria = Effect.fn('Organizer.saveCriteria')(function* (
 	env: Env,
 	identity: string,
 ) {
-	const store = new Store(env.DB, identity);
+	const store = yield* Store;
 	yield* store.saveCriteria(input);
 	return yield* respond(store, env, identity);
 });
@@ -148,21 +141,21 @@ export const saveTags = Effect.fn('Organizer.saveTags')(function* (
 	env: Env,
 	identity: string,
 ) {
-	const store = new Store(env.DB, identity);
+	const store = yield* Store;
 	yield* store.saveTags(input);
 	return yield* respond(store, env, identity);
 });
 export const recoverClassification = Effect.fn(
 	'Organizer.recoverClassification',
 )(function* (env: Env, identity: string) {
-	const store = new Store(env.DB, identity);
+	const store = yield* Store;
 	const crypto = yield* Crypto.Crypto;
 	yield* store.recoverRequests(yield* crypto.randomUUIDv4);
 	return yield* respond(store, env, identity);
 });
 export const startClassification = Effect.fn('Organizer.startClassification')(
 	function* (input: typeof ClassifyInput.Type, env: Env, identity: string) {
-		const store = new Store(env.DB, identity);
+		const store = yield* Store;
 		if (!env.TYPESAFE_API_KEY)
 			return yield* Effect.fail(
 				new HttpError(400, 'Classification is not configured.'),
@@ -189,7 +182,7 @@ const replaceLibrary = Effect.fn('Organizer.replaceLibrary')(function* <
 		previous: Library,
 	) => Effect.Effect<Library, Error, Requirements>,
 ) {
-	const store = new Store(env.DB, identity);
+	const store = yield* Store;
 	const crypto = yield* Crypto.Crypto;
 	const operationId = yield* crypto.randomUUIDv4;
 	const snapshot = yield* store.claimLibrary(operationId);

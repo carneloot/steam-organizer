@@ -15,7 +15,7 @@ import { Steam } from '../../src/services/steam.js';
 import { classifyOne } from './business.js';
 import { HttpError } from './security.js';
 import { Store } from './store.js';
-import { seedLibrary, testDb } from './test-db.js';
+import { seedLibrary, testDb, testStore } from './test-db.js';
 import {
 	ensureStarted,
 	runClassification,
@@ -53,7 +53,7 @@ const run = (id: string, operations: WorkflowServices) =>
 	);
 async function fixture(ids = [1, 2]) {
 	const { db, sqlite } = testDb();
-	const store = new Store(db, 'owner');
+	const store = await Effect.runPromise(testStore(db, 'owner'));
 	await Effect.runPromise(
 		seedLibrary(store, {
 			version: 1,
@@ -109,7 +109,11 @@ async function fixture(ids = [1, 2]) {
 		shouldClassify: store.shouldClassify,
 		finishJob: store.finishJob,
 		failJob: store.failJob,
-		classify: (input) => classifyOne(store, input).pipe(Effect.provide(layer)),
+		classify: (input) =>
+			classifyOne(input).pipe(
+				Effect.provideService(Store, store),
+				Effect.provide(layer),
+			),
 	};
 	return {
 		store,

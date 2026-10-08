@@ -14,7 +14,7 @@ import { authorize, readBody, HttpError } from './security.js';
 import { type Env } from './services.js';
 import { parseCollections, attachCollections } from './steam-collections.js';
 import { Store } from './store.js';
-import { seedLibrary, testDb } from './test-db.js';
+import { seedLibrary, testDb, testStore } from './test-db.js';
 import { reconcile } from './workflow.js';
 
 const mutate = Effect.fnUntraced(function* (
@@ -79,19 +79,19 @@ const apiLayer = Layer.mergeAll(
 	),
 );
 const fixture = Effect.fnUntraced(function* (ids: number[] = [1]) {
-	const { db, sqlite } = testDb();
-	const store = new Store(db, 'owner');
+	const { db, sqlite, queries } = testDb();
+	const store = yield* testStore(db, 'owner');
 	yield* seedLibrary(store, {
 		...library,
 		games: ids.map((appid) => ({ ...game, appid })),
 	});
 	yield* store.startJob('job', selection);
-	return { store, db, sqlite };
+	return { store, db, sqlite, queries };
 });
 
 it('reconciles queued claims and native termination without reading any games', async () => {
 	const { db } = testDb();
-	const store = new Store(db, 'owner');
+	const store = await Effect.runPromise(testStore(db, 'owner'));
 	const created: unknown[] = [];
 	let status = 'queued';
 	const binding = {
@@ -103,7 +103,9 @@ it('reconciles queued claims and native termination without reading any games', 
 	const env = { DB: db, CLASSIFICATION: binding } as unknown as Env;
 	await Effect.runPromise(store.startJob('job', selection));
 	const prepare = vi.spyOn(db, 'prepare');
-	await Effect.runPromise(reconcile(env, 'owner'));
+	await Effect.runPromise(
+		reconcile(env, 'owner').pipe(Effect.provideService(Store, store)),
+	);
 	expect(prepare.mock.calls.map(([sql]) => sql).join('\n')).not.toContain(
 		'library_games',
 	);
@@ -113,10 +115,15 @@ it('reconciles queued claims and native termination without reading any games', 
 		{ id: 'job', params: { owner: 'owner', id: 'job' } },
 	]);
 	status = 'terminated';
-	await Effect.runPromise(reconcile(env, 'owner'));
+	await Effect.runPromise(
+		reconcile(env, 'owner').pipe(Effect.provideService(Store, store)),
+	);
 	expect((await Effect.runPromise(store.getJob()))?.status).toBe('failed');
-	await Effect.runPromise(reconcile(env, 'other'));
-	expect(await Effect.runPromise(new Store(db, 'other').getJob())).toBeNull();
+	const other = await Effect.runPromise(testStore(db, 'other'));
+	await Effect.runPromise(
+		reconcile(env, 'other').pipe(Effect.provideService(Store, other)),
+	);
+	expect(await Effect.runPromise(other.getJob())).toBeNull();
 	await Effect.runPromise(store.startJob('next', selection));
 	binding.create = async () => {
 		throw new Error('start failed');
@@ -124,7 +131,9 @@ it('reconciles queued claims and native termination without reading any games', 
 	binding.get = async () => {
 		throw new Error('missing');
 	};
-	await Effect.runPromise(reconcile(env, 'owner'));
+	await Effect.runPromise(
+		reconcile(env, 'owner').pipe(Effect.provideService(Store, store)),
+	);
 	expect((await Effect.runPromise(store.getJob()))?.status).toBe('failed');
 	await Effect.runPromise(store.claimLibrary('unlocked'));
 });
@@ -134,7 +143,7 @@ it.effect(
 	() =>
 		Effect.gen(function* () {
 			const { db } = testDb();
-			const store = new Store(db, 'owner');
+			const store = yield* testStore(db, 'owner');
 			const captured: { id: string; params: { owner: string; id: string } }[] =
 				[];
 			const binding = {
@@ -192,8 +201,8 @@ it.effect(
 		Effect.gen(function* () {
 			const { db } = testDb();
 			const env = { DB: db } as Env;
-			const owner = new Store(db, 'owner'),
-				other = new Store(db, 'other');
+			const owner = yield* testStore(db, 'owner');
+			const other = yield* testStore(db, 'other');
 			const first = '76561198000000001',
 				second = '76561198000000002';
 			const run = (path: string, body: unknown, identity = 'owner') =>
@@ -249,8 +258,15 @@ it.effect(
 					),
 				).toBe(true);
 			}
-			yield* run('/api/tags', { appid: 1, tags: ['Edited'] });
+			yield* Effect.all(
+				[
+					run('/api/tags', { appid: 1, tags: ['Edited'] }),
+					run('/api/tags', { appid: 1, tags: ['Other edit'] }, 'other'),
+				],
+				{ concurrency: 'unbounded' },
+			);
 			expect((yield* owner.getGame(1))?.game.tags).toEqual(['Edited']);
+			expect((yield* other.getGame(1))?.game.tags).toEqual(['Other edit']);
 			yield* run(
 				'/api/criteria',
 				{ steamId: first, criteria: { Other: 'updated' } },
@@ -265,7 +281,7 @@ it.effect(
 	'competing calls charge once, preserve edits and replay completed requests without reading games',
 	() =>
 		Effect.gen(function* () {
-			const { store, db } = yield* fixture();
+			const { store, queries } = yield* fixture();
 			const entered = yield* Deferred.make<void>(),
 				release = yield* Deferred.make<void>();
 			let calls = 0;
@@ -281,7 +297,8 @@ it.effect(
 						}),
 				}),
 			);
-			const run = classifyOne(store, input).pipe(
+			const run = classifyOne(input).pipe(
+				Effect.provideService(Store, store),
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			const first = yield* run.pipe(Effect.forkScoped);
@@ -298,11 +315,10 @@ it.effect(
 				'Action',
 			]);
 			yield* store.saveTags({ appid: 1, tags: ['After completion'] });
-			const prepare = vi.spyOn(db, 'prepare');
+			queries.length = 0;
 			yield* run;
-			expect(prepare.mock.calls).toHaveLength(1);
-			expect(prepare.mock.calls[0]?.[0]).toContain('classification_requests');
-			prepare.mockRestore();
+			expect(queries).toHaveLength(1);
+			expect(queries[0]).toContain('classification_requests');
 			expect(calls).toBe(1);
 			expect((yield* store.getGame(1))?.game.tags).toEqual([
 				'After completion',
@@ -330,7 +346,8 @@ it.effect(
 						}),
 				}),
 			);
-			const running = yield* classifyOne(store, input).pipe(
+			const running = yield* classifyOne(input).pipe(
+				Effect.provideService(Store, store),
 				Effect.provide(
 					Layer.mergeAll(
 						NodeCrypto.layer,
@@ -373,7 +390,8 @@ it.effect(
 						}),
 				}),
 			);
-			const run = classifyOne(store, input).pipe(
+			const run = classifyOne(input).pipe(
+				Effect.provideService(Store, store),
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			expect(Exit.isFailure(yield* Effect.exit(run))).toBe(true);
@@ -409,7 +427,8 @@ it.effect(
 						}),
 				}),
 			);
-			const run = classifyOne(store, input).pipe(
+			const run = classifyOne(input).pipe(
+				Effect.provideService(Store, store),
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			expect(Exit.isFailure(yield* Effect.exit(run))).toBe(true);
@@ -457,7 +476,8 @@ it.effect(
 				Classifier,
 				Classifier.of({ classifyGame: () => Effect.succeed(['Action']) }),
 			);
-			yield* classifyOne(store, input).pipe(
+			yield* classifyOne(input).pipe(
+				Effect.provideService(Store, store),
 				Effect.provide(Layer.merge(steamLayer, classifier)),
 			);
 			for (const changed of [
@@ -467,7 +487,10 @@ it.effect(
 				expect(
 					Exit.isFailure(
 						yield* Effect.exit(
-							classifyOne(store, changed).pipe(Effect.provide(apiLayer)),
+							classifyOne(changed).pipe(
+								Effect.provideService(Store, store),
+								Effect.provide(apiLayer),
+							),
 						),
 					),
 				).toBe(true);
@@ -482,7 +505,7 @@ it.effect(
 		Effect.gen(function* () {
 			const { db } = testDb();
 			const env = { DB: db } as Env;
-			const store = new Store(db, 'owner');
+			const store = yield* testStore(db, 'owner');
 			const run = (path: string, body: unknown) =>
 				mutate(path, body, env, 'owner').pipe(Effect.provide(apiLayer));
 			expect(
@@ -504,7 +527,9 @@ it.effect(
 				...game,
 				reviewed: true,
 			});
-			expect((yield* new Store(db, 'other').getLibrary()).games).toEqual([]);
+			expect(
+				(yield* (yield* testStore(db, 'other')).getLibrary()).games,
+			).toEqual([]);
 			yield* run('/api/sync', { steamId: '76561198000000002', confirm: true });
 			expect((yield* store.getGame(1))?.game.tags).toEqual([]);
 			yield* run('/api/steam-collections', {

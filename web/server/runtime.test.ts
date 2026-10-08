@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 
 import { buildWorker } from '../../tools/build-worker.js';
-import { Store } from './store.js';
+import { testStore } from './test-db.js';
 
 it('Alchemy Effect Worker validates API requests and saves Workflow results without browser polling', async () => {
 	const issuer = 'https://runtime-team.cloudflareaccess.com';
@@ -211,7 +211,7 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			all: false,
 		});
 		// No further HTTP requests: read persisted state directly while the job runs.
-		const store = new Store(db, 'local@example.test');
+		const store = await Effect.runPromise(testStore(db, 'local@example.test'));
 		const waitForJob = async () => {
 			let job = await Effect.runPromise(store.getJob());
 			for (let attempt = 0; attempt < 150; attempt++) {

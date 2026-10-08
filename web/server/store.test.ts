@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { vi } from 'vitest';
 
 import { Store } from './store.js';
-import { seedLibrary, testDb } from './test-db.js';
+import { seedLibrary, testDb, testStore } from './test-db.js';
 
 const games = [
 	{
@@ -20,7 +20,7 @@ const games = [
 ] as const;
 const library = { version: 1 as const, steamId: null, games };
 const selection = { steamId: null, search: '', category: '', all: true };
-const claim = (store: Store, index: number) => {
+const claim = (store: Store['Service'], index: number) => {
 	const game = games[index === 0 ? 1 : 0];
 	return store.claimRequest({
 		jobId: 'job',
@@ -32,12 +32,12 @@ const claim = (store: Store, index: number) => {
 	});
 };
 const fixture = Effect.fnUntraced(function* () {
-	const { db, sqlite } = testDb();
-	const store = new Store(db, 'owner');
+	const { db, sqlite, queries } = testDb();
+	const store = yield* testStore(db, 'owner');
 	yield* seedLibrary(store, library);
 	yield* store.saveCriteria({ steamId: null, criteria: { Puzzle: 'Puzzles' } });
 	yield* store.startJob('job', selection);
-	return { db, sqlite, store };
+	return { db, sqlite, store, queries };
 });
 
 it.effect(
@@ -64,9 +64,9 @@ it.effect(
 				cancel: false,
 			});
 			expect(yield* store.getRequest('job:0')).toBeNull();
-			expect((yield* new Store(db, 'other').getView()).library.games).toEqual(
-				[],
-			);
+			expect(
+				(yield* (yield* testStore(db, 'other')).getView()).library.games,
+			).toEqual([]);
 			expect(
 				sqlite.prepare('SELECT count(*) AS count FROM library_games').get(),
 			).toEqual({ count: 2 });
@@ -77,32 +77,25 @@ it.effect(
 	'screen and library reads omit the ledger; narrow mutations never load the library',
 	() =>
 		Effect.gen(function* () {
-			const { store, db } = yield* fixture();
-			const prepare = vi.spyOn(db, 'prepare');
+			const { store, queries } = yield* fixture();
+			queries.length = 0;
 			yield* store.getView();
-			expect(prepare.mock.calls).toHaveLength(4);
-			expect(prepare.mock.calls.map(([sql]) => sql).join('\n')).not.toContain(
-				'classification_requests',
-			);
-			prepare.mockClear();
+			expect(queries).toHaveLength(4);
+			expect(queries.join('\n')).not.toContain('classification_requests');
+			queries.length = 0;
 			yield* store.getLibrary();
-			expect(prepare.mock.calls).toHaveLength(2);
-			expect(prepare.mock.calls.map(([sql]) => sql).join('\n')).not.toMatch(
+			expect(queries).toHaveLength(2);
+			expect(queries.join('\n')).not.toMatch(
 				/classification_|category_criteria/,
 			);
-			prepare.mockClear();
+			queries.length = 0;
 			yield* store.saveTags({ appid: 9, tags: ['Manual'] });
-			expect(prepare.mock.calls).toHaveLength(2);
-			expect(
-				prepare.mock.calls.every(([sql]) => sql.startsWith('UPDATE')),
-			).toBe(true);
-			prepare.mockClear();
+			expect(queries).toHaveLength(2);
+			expect(queries.every((sql) => sql.startsWith('UPDATE'))).toBe(true);
+			queries.length = 0;
 			yield* store.cancelJob();
-			expect(prepare.mock.calls).toHaveLength(1);
-			expect(prepare.mock.calls[0]?.[0]).toContain(
-				'UPDATE classification_jobs',
-			);
-			prepare.mockRestore();
+			expect(queries).toHaveLength(1);
+			expect(queries[0]).toContain('UPDATE classification_jobs');
 		}),
 );
 
@@ -115,8 +108,8 @@ it.effect(
 			const id = "job'); DELETE FROM classification_requests; --";
 			const name = "Nine'); DELETE FROM library_games; --";
 			const tag = "Puzzle'); UPDATE libraries SET revision=0; --";
-			const store = new Store(db, owner);
-			const other = new Store(db, 'other');
+			const store = yield* testStore(db, owner);
+			const other = yield* testStore(db, 'other');
 			const prepare = vi.spyOn(db, 'prepare');
 			yield* seedLibrary(other, library);
 			yield* seedLibrary(store, { ...library, games: [{ ...games[1], name }] });
@@ -179,7 +172,7 @@ it.effect(
 	() =>
 		Effect.gen(function* () {
 			const { store, db } = yield* fixture();
-			const other = new Store(db, 'other');
+			const other = yield* testStore(db, 'other');
 			yield* seedLibrary(other, library);
 			yield* other.startJob('job', selection);
 			yield* claim(store, 0);
@@ -202,7 +195,7 @@ it.effect(
 it.effect('competing job starts atomically admit only one job', () =>
 	Effect.gen(function* () {
 		const { db } = testDb();
-		const store = new Store(db, 'owner');
+		const store = yield* testStore(db, 'owner');
 		yield* seedLibrary(store, library);
 		const exits = yield* Effect.forEach(
 			['one', 'two'],
@@ -217,7 +210,7 @@ it.effect('competing job starts atomically admit only one job', () =>
 
 it('job selection retries a stale library snapshot rather than selecting games with outdated tags', async () => {
 	const { db } = testDb();
-	const store = new Store(db, 'owner');
+	const store = await Effect.runPromise(testStore(db, 'owner'));
 	await Effect.runPromise(
 		seedLibrary(store, {
 			...library,
@@ -244,7 +237,7 @@ it.effect(
 	'out-of-order concurrent applies atomically merge tags, increment progress once and retain completion markers',
 	() =>
 		Effect.gen(function* () {
-			const { store, db } = yield* fixture();
+			const { store, queries } = yield* fixture();
 			yield* claim(store, 0);
 			yield* claim(store, 1);
 			yield* store.saveTags({ appid: 620, tags: ['Z', 'Custom', 'A'] });
@@ -266,7 +259,7 @@ it.effect(
 			expect((yield* store.getJob())?.completed).toBe(1);
 			yield* store.saveTags({ appid: 620, tags: ['Edited after completion'] });
 			yield* store.saveResult('job:0', 'lease-0', []);
-			const prepare = vi.spyOn(db, 'prepare');
+			queries.length = 0;
 			yield* Effect.all(
 				[
 					store.applyResult('job:0'),
@@ -275,11 +268,8 @@ it.effect(
 				],
 				{ concurrency: 'unbounded' },
 			);
-			expect(prepare.mock.calls).toHaveLength(12);
-			expect(
-				prepare.mock.calls.every(([sql]) => sql.startsWith('UPDATE')),
-			).toBe(true);
-			prepare.mockRestore();
+			expect(queries).toHaveLength(12);
+			expect(queries.every((sql) => sql.startsWith('UPDATE'))).toBe(true);
 			expect((yield* store.getJob())?.completed).toBe(2);
 			expect((yield* store.getGame(9))?.game).toEqual({
 				...games[1],
@@ -424,8 +414,8 @@ it.effect(
 	() =>
 		Effect.gen(function* () {
 			const { db } = testDb();
-			const store = new Store(db, 'owner');
-			const other = new Store(db, 'other');
+			const store = yield* testStore(db, 'owner');
+			const other = yield* testStore(db, 'other');
 			yield* seedLibrary(store, library);
 			yield* seedLibrary(other, library);
 			const replacement = {
@@ -464,7 +454,9 @@ it('actual D1 executes targeted batches and rolls back a failed multi-table appl
 				.filter((sql) => sql.trim())
 				.map((sql) => db.prepare(sql)),
 		);
-		const store = new Store(db as unknown as D1Database, 'owner');
+		const store = await Effect.runPromise(
+			testStore(db as unknown as D1Database, 'owner'),
+		);
 		await Effect.runPromise(seedLibrary(store, library));
 		await Effect.runPromise(store.startJob('job', selection));
 		await Effect.runPromise(claim(store, 0));

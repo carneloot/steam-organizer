@@ -48,6 +48,8 @@ The web app stores one active library per authenticated email. `library_games` h
 
 The store exposes targeted operations for games, criteria, jobs, and paid requests. Workflow steps read only the job, selected game, or request they need. D1 batches atomically merge saved tags into the current game row, increment job progress, and mark the request complete. Replays leave subsequent manual tag edits untouched. The library revision protects job selection and imports from concurrent library edits; unrelated job and request writes do not use an owner-wide revision check.
 
+`Store` is an Effect `Context.Service`. API requests provide `Store.layer(db, identity)` after authentication; workflow invocations provide a layer for the job's owner. Business operations access it with `yield* Store`. Each layer acquires one scoped D1 client and binds the owner to its queries, so neither the service nor its prepared-statement cache is shared globally across users.
+
 Queries use `@effect/sql-d1` with Effect SQL tagged templates, composable fragments, and record insert/update helpers. Interpolated values become bound parameters, including values inside reused guard fragments. Guarded writes use `RETURNING` to report whether they succeeded. Multi-statement updates use `D1Client.batch`, which rolls back the whole batch on failure. D1 does not support Effect SQL's interactive `withTransaction` API.
 
 Full-library reads are reserved for screen responses, exports, imports/sync, and job selection. Screen responses read only the active account's criteria and omit paid-request bookkeeping. JSON backups and the CLI file format are unchanged.

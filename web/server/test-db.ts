@@ -1,13 +1,13 @@
-import { Effect } from 'effect';
+import { Effect, ManagedRuntime } from 'effect';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach } from 'vitest';
 
 import { type Library } from '../../src/domain/library.js';
-import { type Store } from './store.js';
+import { Store } from './store.js';
 
 export const seedLibrary = Effect.fnUntraced(function* (
-	store: Store,
+	store: Store['Service'],
 	library: Library,
 ) {
 	const { revision } = yield* store.claimLibrary('seed');
@@ -15,7 +15,17 @@ export const seedLibrary = Effect.fnUntraced(function* (
 });
 
 const databases: DatabaseSync[] = [];
-afterEach(() => {
+const runtimes: { dispose(): Promise<void> }[] = [];
+export const testStore = Effect.fnUntraced(function* (
+	db: D1Database,
+	owner: string,
+) {
+	const runtime = ManagedRuntime.make(Store.layer(db, owner));
+	runtimes.push(runtime);
+	return yield* Effect.promise(() => runtime.runPromise(Store));
+});
+afterEach(async () => {
+	for (const runtime of runtimes.splice(0)) await runtime.dispose();
 	for (const database of databases.splice(0)) database.close();
 });
 
@@ -25,28 +35,29 @@ export function testDb() {
 	databases.push(sqlite);
 	sqlite.exec(readFileSync('web/migrations/0001_state.sql', 'utf8'));
 	const execute = new WeakMap<object, () => unknown>();
+	const queries: string[] = [];
+	function prepare(sql: string, values: SQLInputValue[] = []) {
+		const run = () => {
+			queries.push(sql);
+			const statement = sqlite.prepare(sql);
+			const reads = statement.columns().length > 0;
+			const results = reads ? statement.all(...values) : [];
+			const changes = reads ? 0 : Number(statement.run(...values).changes);
+			return { results, success: true, meta: { changes } };
+		};
+		const statement = {
+			bind(...args: SQLInputValue[]): object {
+				return prepare(sql, args);
+			},
+			run: async () => run(),
+			all: async () => run(),
+			first: async () => run().results[0] ?? null,
+		};
+		execute.set(statement, run);
+		return statement;
+	}
 	const db = {
-		prepare: (sql: string) => {
-			let values: SQLInputValue[] = [];
-			const run = () => {
-				const statement = sqlite.prepare(sql);
-				const reads = statement.columns().length > 0;
-				const results = reads ? statement.all(...values) : [];
-				const changes = reads ? 0 : Number(statement.run(...values).changes);
-				return { results, success: true, meta: { changes } };
-			};
-			const statement = {
-				bind(...args: SQLInputValue[]) {
-					values = args;
-					return this;
-				},
-				run: async () => run(),
-				all: async () => run(),
-				first: async () => run().results[0] ?? null,
-			};
-			execute.set(statement, run);
-			return statement;
-		},
+		prepare,
 		batch: async (statements: object[]) => {
 			sqlite.exec('BEGIN');
 			try {
@@ -63,5 +74,5 @@ export function testDb() {
 			}
 		},
 	} as unknown as D1Database;
-	return { db, sqlite };
+	return { db, sqlite, queries };
 }
