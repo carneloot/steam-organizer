@@ -1,0 +1,72 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: steam-organizer-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run lint
+      - run: npm run format
+      - run: npm test
+      - run: npm run build
+      - run: npm run web:build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Load secrets from 1Password
+        id: secrets
+        uses: 1password/load-secrets-action@v5
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: op://Secrets/steam-organizer-github/CLOUDFLARE_ACCOUNT_ID
+          CLOUDFLARE_API_TOKEN: op://Secrets/steam-organizer-github/CLOUDFLARE_API_TOKEN
+          STEAM_API_KEY: op://Secrets/steam-organizer-github/STEAM_API_KEY
+          TYPESAFE_API_KEY: op://Secrets/steam-organizer-github/TYPESAFE_API_KEY
+          ACCESS_EMAILS: op://Secrets/steam-organizer-github/ACCESS_EMAILS
+
+      - name: Deploy production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.secrets.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ steps.secrets.outputs.CLOUDFLARE_API_TOKEN }}
+          STEAM_API_KEY: ${{ steps.secrets.outputs.STEAM_API_KEY }}
+          TYPESAFE_API_KEY: ${{ steps.secrets.outputs.TYPESAFE_API_KEY }}
+          ACCESS_EMAILS: ${{ steps.secrets.outputs.ACCESS_EMAILS }}
+        run: npm run web:deploy -- --yes --no-input

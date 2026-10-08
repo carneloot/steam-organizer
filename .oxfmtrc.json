@@ -32,6 +32,8 @@
 	"ignorePatterns": [
 		"node_modules/**",
 		"dist/**",
+		"**/dist/**",
+		"**/.wrangler/**",
 		"build/**",
 		".react-router/**",
 		"**/convex/_generated/**",

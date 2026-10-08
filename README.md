@@ -1,8 +1,86 @@
 # Steam categorizer
 
-Organize your Steam library with an Effect v4 CLI. Sync your games, classify them automatically with TypeSafe's Jev model, and keep tags locally.
+Organize your Steam library with a Foldkit web app or an Effect v4 CLI. Sync games, import Steam files, and classify games with TypeSafe's Jev model.
 
-The CLI does not edit collections in the Steam client. Its runtime dependencies are `effect@4.0.1` and `@effect/platform-node@4.0.1`. TypeScript, `tsx`, Vitest, `@effect/vitest`, Oxlint, and Oxfmt are development tooling.
+Neither interface edits collections in the Steam client. Effect packages are pinned to `4.0.0` to match Foldkit's peer dependency. The CLI keeps its library locally; the web app saves private libraries and category definitions in Cloudflare D1.
+
+## Run the web app locally
+
+Use Node.js 22.19 or newer. Build the assets and initialize the local database:
+
+```sh
+npm ci
+npm run web:build
+npm run web:db
+```
+
+Run `npm run web:api` and `npm run web:dev` in separate terminals. Open the Vite address printed in the second terminal. Local development uses a shared test identity, not Cloudflare Access. The bypass requires a loopback request and is absent from the Alchemy deployment.
+
+To enable Steam sync and classification locally, put `STEAM_API_KEY` and `TYPESAFE_API_KEY` in `web/.dev.vars`. This file is ignored by Git. Without keys, imports, editing, exports, and category definitions still work. Never put keys in `VITE_*` variables.
+
+## Import a library
+
+Choose **Import** and upload or paste one of these JSON formats:
+
+- A CLI library file, including its Steam ID, tags, and review flags.
+- CLI export JSON.
+- Steam `GetOwnedGames` JSON or a raw game array.
+
+Confirm replacement before importing. Steam game data refreshes matching games while preserving existing tags and review flags. A CLI library import restores its own saved tags and flags. Games absent from the import are removed.
+
+After importing games, use **Steam memberships** to upload a Steam `cloud-storage-namespace-1.json` file. Static collection membership becomes tags on matching app IDs. Deleted collections and removed memberships are excluded. Dynamic collection filters are skipped, not reconstructed. This file cannot supply game names or playtime on its own.
+
+Use **Category criteria** to edit classification questions or import a criteria JSON file. **Import collection names** converts Steam collection names into editable definitions without importing membership. Category definitions are saved under your verified sign-in and the active Steam ID. Offline imports use a separate offline key. Unsaved drafts remain in the tab. Download category JSON separately from the library backup.
+
+## Background classification
+
+**Classify** submits the current search and category filter to a Cloudflare Workflow. Jobs snapshot category definitions and process at most 500 games. The Workflow saves each game's results in D1 and continues after the tab closes. Reopening the app loads saved progress. **Cancel job** stops at the next game boundary, preserving any in-flight result.
+
+Paid requests are not automatically retried. If a provider response is lost, the app blocks further classification until you explicitly clear the uncertain paid lock. Recovery can cause duplicate charges. Starting a new job skips already reviewed games unless you select the option to include them.
+
+## Deploy privately with Alchemy
+
+Deployment provisions a Worker, D1, a rate-limit Durable Object, a Workflow, and Cloudflare Access with email PIN login. Allowlists protect the app, API, and preview URLs. Each authenticated email owns an isolated library. Entering a Steam ID does not prove Steam ownership; sync requires that account's game details to be public.
+
+The [Deploy workflow](.github/workflows/deploy.yml) runs on pushes to `main` or a manual dispatch on `main`. Type checks, lint, formatting, tests, and builds must pass before deployment. Deployments use the GitHub `production` environment and run one at a time.
+
+Configure deployment before merging the workflow:
+
+1. Configure a Cloudflare account and Zero Trust organization. Enable the account's Workers subdomain and ensure the `carneloot.com` zone is active in that account. The app uses `steam-organizer.carneloot.com` as its canonical hostname; Alchemy attaches the Worker custom domain and Cloudflare manages its DNS record and TLS certificate. The existing Access application also protects the custom domain.
+2. Create a 1Password item named `steam-organizer-github` in the `Secrets` vault with these fields:
+
+   | Field                   | Value                                                             |
+   | ----------------------- | ----------------------------------------------------------------- |
+   | `CLOUDFLARE_ACCOUNT_ID` | The target Cloudflare account ID                                  |
+   | `CLOUDFLARE_API_TOKEN`  | An API token scoped to the target account                         |
+   | `STEAM_API_KEY`         | The server-side Steam API key                                     |
+   | `TYPESAFE_API_KEY`      | The server-side TypeSafe API key                                  |
+   | `ACCESS_EMAILS`         | Comma-separated explicit email addresses for you and your friends |
+
+3. Grant the Cloudflare token edit/write permissions for Workers Scripts, D1, Access: Apps and Policies, Access: Organizations, Identity Providers, and Groups, and Secrets Store. Add Zone Read scoped to `carneloot.com` for automatic domain lookup. Scope the token to the target account and zone. Worker custom-domain attachment does not require separate DNS Edit or Workers Routes Edit permissions.
+4. Give a 1Password service account read access to the item. Store its token as the GitHub repository secret `OP_SERVICE_ACCOUNT_TOKEN` so same-repository PR plans can use it. Create a GitHub environment named `production`, restrict it to `main`, and add required reviewers if you want approval before deployment. You can override the repository token with an environment secret of the same name for deployment.
+
+The workflows use `1password/load-secrets-action@v5`, matching `bg3-equipment-guide`. Each field resolves from `op://Secrets/steam-organizer-github/<field>`. Resolved values are passed only to deployment, planning, and comment redaction steps, not exported globally. No Cloudflare profile or additional state password is required.
+
+Alchemy uses Cloudflare-backed state and the `production` stage, so fresh GitHub runners share the same deployment state. If you already deployed with the previous local-state configuration, migrate that state before enabling CI deployment. Do not discard it or automatically adopt existing resources.
+
+### Production plans on pull requests
+
+The [Alchemy Production Plan workflow](.github/workflows/alchemy-plan.yml) follows `sheetz`: it plans the PR head against the `production` stage and creates or updates one bot-owned PR comment. The comment lists resource, binding, and stack-action changes, identifies the revision, and links to the workflow run. Planning failures also produce a comment and fail the job. Outdated runs are canceled and do not overwrite comments for a newer revision.
+
+The workflow uses Alchemy's structured `Stack.plan` API without applying the plan. It disables state-store updates, so the Cloudflare-backed state store must already be bootstrapped through an authorized deployment before PR planning can succeed. Planning still evaluates PR code and contacts Cloudflare; it is not an offline diff. Raw logs and resource properties are excluded from comments, and configured secrets and allowlisted emails are redacted.
+
+Planning logs show Cloudflare API methods, sanitized route templates, and HTTP statuses for each attempt, including retries. Resource identifiers, query strings, headers, and bodies are omitted. Transport failures are logged without their error payloads. These diagnostics do not read response bodies, so an HTTP 200 response containing an API-level error still appears as HTTP 200; use it alongside the final Alchemy error. Diagnostic logs remain in the workflow run, not the PR comment.
+
+Fork PRs are skipped. Same-repository PR authors must be trusted with the production credentials because their code runs in the planning job. The plan job does not use the `production` environment restricted to `main`; it needs the repository-level 1Password token described above. Production deployment still uses the protected environment.
+
+Cloudflare permits one email PIN identity provider per scope. If an existing provider is not owned by this stack, resolve its reuse or adoption before the first deployment. The workflow does not pass `--adopt` automatically.
+
+Do not deploy `web/wrangler.local.jsonc`; it is exclusively for the emulator. Add friends by updating the 1Password `ACCESS_EMAILS` field and running Deploy on `main`. The workflow provisions resources and the custom hostname on the first run; the Cloudflare zone must already exist. It does not copy the reference project's public-page health check or Worker-only rollback, which would not verify this Access-protected app or roll back its D1 migrations.
+
+All invited users share the deployed Steam and TypeSafe credentials and their costs. API keys never reach the browser. Classification sends game names, app IDs, descriptions, and your category questions to TypeSafe, not Steam IDs or existing tags. Libraries and category definitions are server-side, not browser-only.
+
+The cloud deployment and live Access login require verification after provisioning. Local tests use mocked provider traffic and do not incur charges. Alchemy and the current Wrangler runtime are pinned prerelease tooling; inspect `npm audit` before deploying. Production browser dependencies have no reported vulnerabilities, but development tooling currently includes upstream audit findings.
 
 ## Run the CLI
 
