@@ -107,6 +107,46 @@ it.effect(
 );
 
 it.effect(
+	'composed SQL fragments bind quoted values without leaking across owners',
+	() =>
+		Effect.gen(function* () {
+			const { db } = testDb();
+			const owner = "owner' OR 1=1 --";
+			const id = "job'); DELETE FROM classification_requests; --";
+			const name = "Nine'); DELETE FROM library_games; --";
+			const tag = "Puzzle'); UPDATE libraries SET revision=0; --";
+			const store = new Store(db, owner);
+			const other = new Store(db, 'other');
+			const prepare = vi.spyOn(db, 'prepare');
+			yield* seedLibrary(other, library);
+			yield* seedLibrary(store, { ...library, games: [{ ...games[1], name }] });
+			yield* store.saveCriteria({ steamId: null, criteria: { [tag]: name } });
+			yield* store.startJob(id, selection);
+			expect(
+				yield* store.claimRequest({
+					jobId: id,
+					index: 0,
+					appid: 9,
+					name,
+					steamId: null,
+					operationId: 'lease',
+				}),
+			).toBe(true);
+			yield* store.saveResult(`${id}:0`, 'lease', [tag]);
+			yield* store.applyResult(`${id}:0`);
+			expect((yield* store.getGame(9))?.game.tags).toEqual([tag]);
+			expect((yield* store.getJob())?.completed).toBe(1);
+			expect((yield* store.getView()).criteria).toEqual({ [tag]: name });
+			expect(yield* other.getLibrary()).toEqual(library);
+			expect(yield* other.getJob()).toBeNull();
+			const queries = prepare.mock.calls.map(([query]) => query).join('\n');
+			for (const value of [owner, id, name, tag])
+				expect(queries).not.toContain(value);
+			prepare.mockRestore();
+		}),
+);
+
+it.effect(
 	'only one competing paid claim succeeds, while different games claim independently',
 	() =>
 		Effect.gen(function* () {

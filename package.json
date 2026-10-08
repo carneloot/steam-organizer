@@ -26,6 +26,7 @@
 	"dependencies": {
 		"@effect/platform-browser": "4.0.0",
 		"@effect/platform-node": "4.0.0",
+		"@effect/sql-d1": "4.0.0",
 		"effect": "4.0.0",
 		"foldkit": "0.166.0",
 		"jose": "^6.2.12"
