@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      repair_drift:
+        description: 'Repair infrastructure drift before deploying (entire stack, including missing resources)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -69,4 +75,10 @@ jobs:
           STEAM_API_KEY: ${{ steps.secrets.outputs.STEAM_API_KEY }}
           TYPESAFE_API_KEY: ${{ steps.secrets.outputs.TYPESAFE_API_KEY }}
           ACCESS_EMAILS: ${{ steps.secrets.outputs.ACCESS_EMAILS }}
-        run: npm run web:deploy -- --yes --no-input
+          REPAIR_DRIFT: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_drift == true }}
+        run: |
+          args=(--yes --no-input)
+          if [[ "$REPAIR_DRIFT" == "true" ]]; then
+            args+=(--detect-drift)
+          fi
+          npm run web:deploy -- "${args[@]}"

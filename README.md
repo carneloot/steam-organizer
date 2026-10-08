@@ -68,6 +68,8 @@ Deployment provisions a Worker, D1, a rate-limit Durable Object, a Workflow, and
 
 The [Deploy workflow](.github/workflows/deploy.yml) runs on pushes to `main` or a manual dispatch on `main`. Type checks, lint, formatting, tests, and builds must pass before deployment. Deployments use the GitHub `production` environment and run one at a time.
 
+To recover a manually deleted resource, open **Actions > Deploy > Run workflow**, select `main`, and enable **repair_drift**. This option adds `--detect-drift` to the deployment command. With CI's `--yes` flag, Alchemy automatically repairs detected drift across the entire stack before deploying, not just D1. Recreating a deleted database applies the current schema but does not restore deleted data. Leave the option off for normal deployments; push-triggered deployments never enable it.
+
 Configure deployment before merging the workflow:
 
 1. Configure a Cloudflare account and Zero Trust organization. Enable the account's Workers subdomain and ensure the `carneloot.com` zone is active in that account. The app uses `steam-organizer.carneloot.com` as its canonical hostname; Alchemy attaches the Worker custom domain and Cloudflare manages its DNS record and TLS certificate. The existing Access application also protects the custom domain.
