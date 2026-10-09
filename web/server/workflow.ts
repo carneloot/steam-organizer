@@ -1,6 +1,6 @@
 import { WorkerEnvironment } from 'alchemy/Cloudflare/Workers';
 import { Workflow, task } from 'alchemy/Cloudflare/Workflows';
-import { Effect, Exit } from 'effect';
+import { Cause, Effect, Exit } from 'effect';
 
 import { classifyOne } from './business.js';
 import { HttpError } from './security.js';
@@ -65,7 +65,23 @@ export const runClassification = Effect.fn('Classification.runBatch')(
 							});
 						}),
 						options,
-					).pipe(Effect.exit);
+					).pipe(
+						Effect.catchCause((cause) => {
+							const error = Cause.squash(cause);
+							return task(
+								`error-${gameIndex}-${appid}`,
+								operations.saveGameError(
+									id,
+									appid,
+									error instanceof HttpError
+										? error.message
+										: 'Classification failed. Try this game in a later job.',
+								),
+								options,
+							);
+						}),
+						Effect.exit,
+					);
 				},
 				{ concurrency },
 			);
@@ -99,6 +115,7 @@ export const workflowServices = Effect.fn('Classification.services')(function* (
 		getJob: store.getJob,
 		beginBatch: store.beginBatch,
 		shouldClassify: store.shouldClassify,
+		saveGameError: store.saveGameError,
 		finishJob: store.finishJob,
 		failJob: store.failJob,
 		classify: (input: Parameters<typeof classifyOne>[0]) =>

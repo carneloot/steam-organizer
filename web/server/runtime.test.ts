@@ -1,11 +1,10 @@
 import { Effect } from 'effect';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Miniflare, Response, convertV4MiniflareOptions } from 'miniflare';
-import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 
 import { buildWorker } from '../../tools/build-worker.js';
-import { testStore } from './test-db.js';
+import { migrationSql, testStore } from './test-db.js';
 
 it('Alchemy Effect Worker validates API requests and saves Workflow results without browser polling', async () => {
 	const issuer = 'https://runtime-team.cloudflareaccess.com';
@@ -85,7 +84,7 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 	);
 	try {
 		const db = await runtime.getD1Database('DB');
-		const sql = await readFile('web/migrations/0001_state.sql', 'utf8');
+		const sql = migrationSql();
 		await db.batch(
 			sql
 				.split(';')
@@ -241,7 +240,8 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 			all: true,
 		});
 		document = await waitForJob();
-		expect(document.job?.status).toBe('failed');
+		expect(document.job?.status).toBe('complete');
+		expect(document.job?.error).toBeNull();
 		expect(document.job?.completed).toBe(0);
 		expect(calls).toBe(6);
 		expect(

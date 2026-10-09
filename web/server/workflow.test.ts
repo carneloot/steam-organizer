@@ -107,6 +107,7 @@ async function fixture(ids = [1, 2]) {
 		getJob: store.getJob,
 		beginBatch: store.beginBatch,
 		shouldClassify: store.shouldClassify,
+		saveGameError: store.saveGameError,
 		finishJob: store.finishJob,
 		failJob: store.failJob,
 		classify: (input) =>
@@ -196,12 +197,13 @@ it('runs three games concurrently and replays out-of-order completions without c
 		).toMatchObject({ completed: true, appid: i + 1 });
 });
 
-it('drains successful in-flight siblings before failing, preserves uncertain requests and requires consent recovery', async () => {
+it('stores game failures, completes later batches, and retries only unsuccessful games in a new workflow', async () => {
 	const test = await fixture([1, 2, 3, 4]);
 	const entered = [gate(), gate(), gate()],
 		release = [gate(), gate(), gate()];
 	test.setProvider((appid) =>
 		Effect.gen(function* () {
+			if (appid === 4) return ['Action'];
 			entered[appid - 1]!.open();
 			yield* Effect.promise(() => release[appid - 1]!.promise);
 			if (appid === 2) return ['Action'];
@@ -211,7 +213,6 @@ it('drains successful in-flight siblings before failing, preserves uncertain req
 		}),
 	);
 	const running = run('job', test.operations);
-	const rejected = expect(running).rejects.toThrow('Paid outcome uncertain');
 	await Promise.all(entered.map((item) => item.promise));
 	release[0]!.open();
 	release[2]!.open();
@@ -220,13 +221,28 @@ it('drains successful in-flight siblings before failing, preserves uncertain req
 		Effect.runPromise(test.store.recoverRequests('recover')),
 	).rejects.toThrow('active');
 	release[1]!.open();
-	await rejected;
-	expect(test.calls).toEqual([1, 2, 3]);
+	await running;
+	expect(test.calls).toEqual([1, 2, 3, 4]);
 	expect((await test.get()).job).toMatchObject({
-		status: 'failed',
-		completed: 1,
+		status: 'complete',
+		completed: 2,
+		error: null,
 	});
-	expect((await test.get()).library.games[1]?.reviewed).toBe(true);
+	expect((await test.get()).library.games.map((game) => game.reviewed)).toEqual(
+		[false, true, false, true],
+	);
+	const errors = () =>
+		test.sqlite
+			.prepare('SELECT appid,error FROM classification_errors ORDER BY appid')
+			.all();
+	expect(errors()).toEqual([
+		{ appid: 1, error: expect.stringContaining('Paid outcome uncertain') },
+		{ appid: 3, error: expect.stringContaining('Paid outcome uncertain') },
+	]);
+	// A replay of this workflow must not retry its failed paid requests.
+	test.sqlite.exec("UPDATE classification_jobs SET status='running'");
+	await run('job', test.operations);
+	expect(test.calls).toEqual([1, 2, 3, 4]);
 	await expect(
 		Effect.runPromise(test.store.claimLibrary('replace')),
 	).rejects.toThrow('uncertain');
@@ -236,7 +252,67 @@ it('drains successful in-flight siblings before failing, preserves uncertain req
 	expect(await Effect.runPromise(test.store.getRequest('job:1'))).toMatchObject(
 		{ completed: true },
 	);
-	await Effect.runPromise(test.store.claimLibrary('replace'));
+	expect(errors()).toHaveLength(2);
+	await Effect.runPromise(
+		test.store.startJob('retry', {
+			steamId: null,
+			search: '',
+			category: '',
+			all: false,
+		}),
+	);
+	expect((await test.get()).job?.ids).toEqual([1, 3]);
+	test.setProvider(() => Effect.succeed(['Action']));
+	await run('retry', test.operations);
+	expect(test.calls).toEqual([1, 2, 3, 4, 1, 3]);
+	expect((await test.get()).job).toMatchObject({
+		status: 'complete',
+		completed: 2,
+		error: null,
+	});
+	expect((await test.get()).library.games.every((game) => game.reviewed)).toBe(
+		true,
+	);
+	expect(errors()).toEqual([]);
+});
+
+it('retries a failed reclassification without recovery when no paid request was made', async () => {
+	const test = await fixture([1, 2, 3, 4]);
+	test.sqlite.exec('UPDATE library_games SET reviewed=1');
+	const classify = test.operations.classify;
+	test.operations.classify = (input) =>
+		input.appid === 1
+			? Effect.fail(new HttpError(404, 'Game description unavailable.'))
+			: classify(input);
+	await run('job', test.operations);
+	expect((await test.get()).job).toMatchObject({
+		status: 'complete',
+		completed: 3,
+		error: null,
+	});
+	expect((await Effect.runPromise(test.store.getGame(1)))?.game.reviewed).toBe(
+		false,
+	);
+	expect(
+		test.sqlite.prepare('SELECT appid,error FROM classification_errors').all(),
+	).toEqual([{ appid: 1, error: 'Game description unavailable.' }]);
+	await Effect.runPromise(
+		test.store.startJob('retry', {
+			steamId: null,
+			search: '',
+			category: '',
+			all: false,
+		}),
+	);
+	expect((await test.get()).job?.ids).toEqual([1]);
+	test.operations.classify = classify;
+	await run('retry', test.operations);
+	expect((await test.get()).job).toMatchObject({
+		status: 'complete',
+		completed: 1,
+		error: null,
+	});
+	expect(test.calls).toEqual([2, 3, 4, 1]);
 });
 
 it('journal failure after an atomic save cannot charge completed games or overwrite tag edits on replay', async () => {
@@ -250,8 +326,11 @@ it('journal failure after an atomic save cannot charge completed games or overwr
 					: Effect.void,
 			),
 		);
-	await expect(run('job', test.operations)).rejects.toThrow('journal lost');
+	await run('job', test.operations);
 	expect((await test.get()).job?.completed).toBe(2);
+	expect(
+		test.sqlite.prepare('SELECT * FROM classification_errors').all(),
+	).toEqual([]);
 	test.sqlite.exec("UPDATE classification_jobs SET status='running'");
 	await Effect.runPromise(test.store.saveTags({ appid: 1, tags: ['Edited'] }));
 	test.operations.classify = classify;

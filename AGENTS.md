@@ -4,6 +4,8 @@
 
 This is a personal project. Existing application data is disposable, and losing it during schema changes is acceptable.
 
-When changing persistence, update the current schema directly. Do not add data-preserving migrations, backfills, or compatibility code solely to retain old data unless the user explicitly requests it. Prefer a clean database reset over migration machinery.
+For every database schema change, add a new numbered SQL migration in `web/migrations`. Do not edit existing migrations.
+
+Keep migrations simple. Destructive schema changes are acceptable. Do not add backfills, compatibility layers, staged rollouts, or other production-grade machinery solely to preserve disposable data unless explicitly requested.
 
 This policy applies to application data, not credentials, deployment state, or shared infrastructure. It does not authorize unrequested deployments or remote database resets.
