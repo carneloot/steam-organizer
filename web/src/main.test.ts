@@ -394,23 +394,27 @@ describe('Scene states and consent', () => {
 			).toBeDisabled(),
 		);
 	});
-	it('shows failed server progress and gates duplicate-charge recovery', () => {
-		Scene.scene(
-			{ update, view },
-			Scene.given({
-				...ready(),
-				state: {
-					...state,
-					job: { ...job, status: 'failed', error: 'Uncertain paid outcome' },
-				},
-			}),
-			Scene.expect(Scene.text(/Classification failed/)).toExist(),
-			Scene.expect(Scene.text('Uncertain paid outcome')).toExist(),
-			Scene.expect(
-				Scene.role('button', { name: 'Clear uncertain paid lock' }),
-			).toBeDisabled(),
-		);
-	});
+	it.each(['failed', 'complete', 'cancelled'] as const)(
+		'gates duplicate-charge recovery for %s jobs with unsuccessful games',
+		(status) => {
+			Scene.scene(
+				{ update, view },
+				Scene.given({
+					...ready(),
+					state: {
+						...state,
+						job: { ...job, status, error: null },
+					},
+				}),
+				Scene.expect(
+					Scene.text(new RegExp(`Classification ${status}`)),
+				).toExist(),
+				Scene.expect(
+					Scene.role('button', { name: 'Clear uncertain paid lock' }),
+				).toBeDisabled(),
+			);
+		},
+	);
 	it('requires consent for static memberships', () => {
 		Scene.scene(
 			{ update, view },

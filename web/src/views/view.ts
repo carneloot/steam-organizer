@@ -170,7 +170,8 @@ export const view = (model: Model, html: HtmlBuilder<Message>): Document => {
 														),
 													]
 												: []),
-											...(job.status === 'failed'
+											...(job.status === 'failed' ||
+											(!activeJob(model) && job.completed < job.total)
 												? [
 														check(
 															'I understand that clearing an uncertain paid lock can cause duplicate charges. Do not do this for an ordinary network retry.',

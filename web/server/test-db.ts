@@ -1,5 +1,5 @@
 import { Effect, ManagedRuntime } from 'effect';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach } from 'vitest';
 
@@ -29,11 +29,18 @@ afterEach(async () => {
 	for (const database of databases.splice(0)) database.close();
 });
 
+export const migrationSql = () =>
+	readdirSync('web/migrations')
+		.filter((file) => file.endsWith('.sql'))
+		.sort()
+		.map((file) => readFileSync(`web/migrations/${file}`, 'utf8'))
+		.join('\n');
+
 // Execute real SQL rather than teaching a fake about each production query.
 export function testDb() {
 	const sqlite = new DatabaseSync(':memory:');
 	databases.push(sqlite);
-	sqlite.exec(readFileSync('web/migrations/0001_state.sql', 'utf8'));
+	sqlite.exec(migrationSql());
 	const execute = new WeakMap<object, () => unknown>();
 	const queries: string[] = [];
 	function prepare(sql: string, values: SQLInputValue[] = []) {

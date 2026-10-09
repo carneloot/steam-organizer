@@ -338,9 +338,29 @@ function makeStore(sql: D1Client.D1Client, owner: string) {
 		(id: string, index: number) =>
 			sql`SELECT 1 FROM classification_jobs j WHERE j.owner=${owner} AND j.id=${id}
 			AND j.status IN ('queued','running') AND j.cancel=0 AND NOT EXISTS
-			(SELECT 1 FROM classification_requests r WHERE r.owner=${owner} AND r.request_id=${`${id}:${index}`} AND r.completed=1)`.pipe(
+			(SELECT 1 FROM classification_requests r WHERE r.owner=${owner} AND r.request_id=${`${id}:${index}`} AND r.completed=1)
+			AND NOT EXISTS (SELECT 1 FROM classification_errors e WHERE e.owner=j.owner AND e.job_id=j.id
+				AND e.appid=json_extract(j.ids,${`$[${index}]`}))`.pipe(
 				Effect.map((rows) => rows.length > 0),
 			),
+	);
+	const saveGameError = Effect.fn('Store.saveGameError')(
+		(id: string, appid: number, error: string) =>
+			sql
+				.batch([
+					sql`INSERT INTO classification_errors(owner,appid,job_id,error)
+			SELECT j.owner,g.appid,j.id,${error} FROM classification_jobs j
+			JOIN library_games g ON g.owner=j.owner AND g.appid=${appid}
+			WHERE j.owner=${owner} AND j.id=${id} AND j.status IN ('queued','running')
+			AND EXISTS (SELECT 1 FROM json_each(j.ids) WHERE value=g.appid)
+			AND NOT EXISTS (SELECT 1 FROM classification_requests r WHERE r.owner=j.owner
+				AND r.job_id=j.id AND r.appid=g.appid AND r.completed=1)
+			ON CONFLICT(owner,appid) DO UPDATE SET job_id=excluded.job_id,error=excluded.error`,
+					sql`UPDATE library_games SET reviewed=0 WHERE owner=${owner} AND appid=${appid}
+				AND EXISTS (SELECT 1 FROM classification_errors e JOIN classification_jobs j ON j.owner=e.owner AND j.id=e.job_id
+					WHERE e.owner=${owner} AND e.appid=${appid} AND e.job_id=${id} AND j.status IN ('queued','running'))`,
+				])
+				.pipe(Effect.asVoid),
 	);
 	const finishJob = Effect.fn('Store.finishJob')((id: string) =>
 		sql`UPDATE classification_jobs
@@ -430,6 +450,8 @@ function makeStore(sql: D1Client.D1Client, owner: string) {
 				sql`UPDATE classification_jobs SET completed=completed+1,current=NULL WHERE owner=${owner}
 				AND id=(SELECT r.job_id FROM classification_requests r WHERE ${saved})`,
 				sql`UPDATE libraries SET revision=revision+1 WHERE owner=${owner} AND EXISTS (SELECT 1 FROM classification_requests r WHERE ${saved})`,
+				sql`DELETE FROM classification_errors WHERE owner=${owner}
+				AND appid=(SELECT r.appid FROM classification_requests r WHERE ${saved})`,
 				sql`UPDATE classification_requests SET completed=1,tags=NULL,operation_id=NULL,operation_expires_at=NULL
 				WHERE owner=${owner} AND request_id=${requestId} AND completed=0 AND tags IS NOT NULL`,
 			])
@@ -479,6 +501,7 @@ function makeStore(sql: D1Client.D1Client, owner: string) {
 		cancelJob,
 		beginBatch,
 		shouldClassify,
+		saveGameError,
 		finishJob,
 		failJob,
 		claimRequest,

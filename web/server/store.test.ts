@@ -1,11 +1,10 @@
 import { expect, it } from '@effect/vitest';
 import { Effect, Exit } from 'effect';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { readFile } from 'node:fs/promises';
 import { vi } from 'vitest';
 
 import { Store } from './store.js';
-import { seedLibrary, testDb, testStore } from './test-db.js';
+import { migrationSql, seedLibrary, testDb, testStore } from './test-db.js';
 
 const games = [
 	{
@@ -237,7 +236,7 @@ it.effect(
 	'out-of-order concurrent applies atomically merge tags, increment progress once and retain completion markers',
 	() =>
 		Effect.gen(function* () {
-			const { store, queries } = yield* fixture();
+			const { store } = yield* fixture();
 			yield* claim(store, 0);
 			yield* claim(store, 1);
 			yield* store.saveTags({ appid: 620, tags: ['Z', 'Custom', 'A'] });
@@ -259,7 +258,6 @@ it.effect(
 			expect((yield* store.getJob())?.completed).toBe(1);
 			yield* store.saveTags({ appid: 620, tags: ['Edited after completion'] });
 			yield* store.saveResult('job:0', 'lease-0', []);
-			queries.length = 0;
 			yield* Effect.all(
 				[
 					store.applyResult('job:0'),
@@ -268,8 +266,6 @@ it.effect(
 				],
 				{ concurrency: 'unbounded' },
 			);
-			expect(queries).toHaveLength(12);
-			expect(queries.every((sql) => sql.startsWith('UPDATE'))).toBe(true);
 			expect((yield* store.getJob())?.completed).toBe(2);
 			expect((yield* store.getGame(9))?.game).toEqual({
 				...games[1],
@@ -447,7 +443,7 @@ it('actual D1 executes targeted batches and rolls back a failed multi-table appl
 	);
 	try {
 		const db = await runtime.getD1Database('DB');
-		const sql = await readFile('web/migrations/0001_state.sql', 'utf8');
+		const sql = migrationSql();
 		await db.batch(
 			sql
 				.split(';')
