@@ -464,6 +464,13 @@ function makeStore(sql: D1Client.D1Client, owner: string) {
 				Effect.asVoid,
 			),
 	);
+	const discardRejectedRequest = Effect.fn('Store.discardRejectedRequest')(
+		(requestId: string, operationId: string) =>
+			sql`DELETE FROM classification_requests WHERE owner=${owner} AND request_id=${requestId}
+			AND operation_id=${operationId} AND completed=0 AND tags IS NULL`.pipe(
+				Effect.asVoid,
+			),
+	);
 	const recoverRequests = Effect.fn('Store.recoverRequests')(function* (
 		operationId: string,
 	) {
@@ -508,6 +515,7 @@ function makeStore(sql: D1Client.D1Client, owner: string) {
 		saveResult,
 		applyResult,
 		releaseRequest,
+		discardRejectedRequest,
 		recoverRequests,
 	};
 }

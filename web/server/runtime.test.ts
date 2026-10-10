@@ -28,6 +28,8 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 	const bundled = await buildWorker();
 	let calls = 0;
 	let rejectPaidRequests = false;
+	let rateLimitedAttempts = 0;
+	let testRateLimit = false;
 	const pending: (() => void)[] = [];
 	const runtime = new Miniflare(
 		convertV4MiniflareOptions({
@@ -69,10 +71,16 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 					});
 				calls++;
 				if (rejectPaidRequests) return new Response('{}', { status: 401 });
-				await new Promise<void>((resolve) => {
-					pending.push(resolve);
-					if (pending.length === 3) pending.forEach((release) => release());
-				});
+				if (testRateLimit && rateLimitedAttempts++ === 0)
+					return new Response('{}', {
+						status: 429,
+						headers: { 'Retry-After': '2', 'x-request-id': 'limited-request' },
+					});
+				if (!testRateLimit)
+					await new Promise<void>((resolve) => {
+						pending.push(resolve);
+						if (pending.length === 3) pending.forEach((release) => release());
+					});
 				return new Response(
 					JSON.stringify({ answers: { Puzzle: { type: 'noul', noul: 0.95 } } }),
 					{
@@ -279,6 +287,23 @@ it('Alchemy Effect Worker validates API requests and saves Workflow results with
 				.bind('local@example.test')
 				.first(),
 		).toEqual({ count: 0 });
+		rejectPaidRequests = false;
+		testRateLimit = true;
+		await post('classify', {
+			steamId: null,
+			search: 'Portal 2',
+			category: '',
+			all: true,
+		});
+		document = await waitForJob();
+		expect(document.job).toMatchObject({ status: 'complete', completed: 1 });
+		expect(rateLimitedAttempts).toBe(2);
+		expect(
+			document.library.games.find((game) => game.appid === 620),
+		).toMatchObject({ reviewed: true, tags: ['Puzzle'] });
+		expect(
+			await Effect.runPromise(store.getRequest(`${document.job?.id}:0`)),
+		).toMatchObject({ completed: true });
 	} finally {
 		await runtime.dispose();
 	}

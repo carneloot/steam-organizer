@@ -9,6 +9,7 @@ import { expect, it } from 'vitest';
 
 import {
 	Classifier,
+	ClassificationDeferred,
 	ClassificationRequestError,
 } from '../../src/services/classifier.js';
 import { Steam } from '../../src/services/steam.js';
@@ -80,8 +81,10 @@ async function fixture(ids = [1, 2]) {
 	);
 	let provider: (
 		appid: number,
-	) => Effect.Effect<string[], ClassificationRequestError> = () =>
-		Effect.succeed(['Action']);
+	) => Effect.Effect<
+		string[],
+		ClassificationRequestError | ClassificationDeferred
+	> = () => Effect.succeed(['Action']);
 	const calls: number[] = [];
 	const layer = Layer.mergeAll(
 		NodeCrypto.layer,
@@ -236,7 +239,12 @@ it('stores game failures, completes later batches, and retries only unsuccessful
 			.prepare('SELECT appid,error FROM classification_errors ORDER BY appid')
 			.all();
 	expect(errors()).toEqual([
-		{ appid: 1, error: expect.stringContaining('Paid outcome uncertain') },
+		{
+			appid: 1,
+			error: expect.stringContaining(
+				'Game 1 (appid 1, provider): provider lost',
+			),
+		},
 		{ appid: 3, error: expect.stringContaining('Paid outcome uncertain') },
 	]);
 	// A replay of this workflow must not retry its failed paid requests.
@@ -275,6 +283,70 @@ it('stores game failures, completes later batches, and retries only unsuccessful
 	);
 	expect(errors()).toEqual([]);
 });
+
+it.each(['success', 'exhausted', 'cancelled'] as const)(
+	'durably waits for rejected requests and permit deferrals: %s',
+	async (outcome) => {
+		const test = await fixture([1]);
+		let calls = 0;
+		test.setProvider(() => {
+			calls++;
+			if (calls === 2)
+				return Effect.fail(
+					new ClassificationDeferred({
+						message: 'Shared cooldown. No request was sent.',
+						retryAfterMs: 90_000,
+					}),
+				);
+			if (calls === 3 && outcome === 'success')
+				return Effect.succeed(['Action']);
+			return Effect.fail(
+				new ClassificationRequestError({
+					message: 'Jev returned HTTP 429.',
+					status: 429,
+					retryAfterMs: 75_000,
+					requestId: 'request-429',
+				}),
+			);
+		});
+		const waits: Array<string | number> = [];
+		await Effect.runPromise(
+			runClassification('job', test.operations).pipe(
+				Effect.provideService(WorkflowStep, {
+					...step,
+					sleep: (_name, duration) =>
+						Effect.gen(function* () {
+							waits.push(duration);
+							// The claim must be gone before the durable sleep, not merely released.
+							expect(yield* test.store.getRequest('job:0')).toBeNull();
+							if (outcome === 'cancelled') yield* test.store.cancelJob();
+						}),
+				}),
+			),
+		);
+		const view = await test.get();
+		if (outcome === 'success') {
+			expect(waits).toEqual([75_000, 90_000]);
+			expect(view.job).toMatchObject({ status: 'complete', completed: 1 });
+			expect(view.library.games[0]?.tags).toEqual(['Action']);
+		} else if (outcome === 'exhausted') {
+			expect(calls).toBe(5); // Four 429s plus one pre-send deferral.
+			expect(waits).toEqual([75_000, 90_000, 75_000, 75_000]);
+			expect(view.job).toMatchObject({ status: 'complete', completed: 0 });
+			expect(
+				test.sqlite.prepare('SELECT error FROM classification_errors').get(),
+			).toEqual({
+				error: expect.stringMatching(/HTTP 429.*request-429.*exhausted/),
+			});
+			expect(
+				await Effect.runPromise(test.store.getRequest('job:0')),
+			).toBeNull();
+		} else {
+			expect(calls).toBe(1);
+			expect(view.job).toMatchObject({ status: 'cancelled', completed: 0 });
+		}
+	},
+);
 
 it('retries a failed reclassification without recovery when no paid request was made', async () => {
 	const test = await fixture([1, 2, 3, 4]);

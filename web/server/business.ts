@@ -1,4 +1,4 @@
-import { Crypto, Effect, Schema } from 'effect';
+import { Cause, Crypto, Effect, Schema } from 'effect';
 
 import { CategoryCriteria } from '../../src/domain/classification.js';
 import {
@@ -6,7 +6,13 @@ import {
 	emptyLibrary,
 	mergeLibrary,
 } from '../../src/domain/library.js';
-import { Classifier } from '../../src/services/classifier.js';
+import {
+	Classifier,
+	ClassificationDeferred,
+	ClassificationRequestError,
+	ClassificationResponseError,
+	ClassificationTimeoutError,
+} from '../../src/services/classifier.js';
 import { LibraryService } from '../../src/services/library.js';
 import { Steam } from '../../src/services/steam.js';
 import {
@@ -85,6 +91,12 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(
 			return yield* Effect.fail(new HttpError(404, 'Game missing.'));
 		const steam = yield* Steam;
 		const crypto = yield* Crypto.Crypto;
+		yield* Effect.logInfo('Classification game started', {
+			jobId: input.jobId,
+			index: input.index,
+			appid: input.appid,
+			name: selected.game.name,
+		});
 		const description = yield* steam.fetchGameDescription(input.appid);
 		const operationId = yield* crypto.randomUUIDv4;
 		const claimed = yield* store.claimRequest({
@@ -94,23 +106,65 @@ export const classifyOne = Effect.fn('Organizer.classifyOne')(
 			operationId,
 		});
 		if (!claimed) return yield* store.applyResult(requestId);
+		let stage = 'provider';
 		return yield* Effect.gen(function* () {
 			const classifier = yield* Classifier;
 			const tags = yield* classifier.classifyGame(
 				{ ...selected.game, description },
 				input.criteria,
 			);
+			stage = 'save-result';
 			yield* store.saveResult(requestId, operationId, tags);
+			stage = 'apply-result';
 			yield* store.applyResult(requestId);
+			yield* Effect.logInfo('Classification game completed', {
+				jobId: input.jobId,
+				appid: input.appid,
+				name: selected.game.name,
+			});
 		}).pipe(
 			Effect.timeout('45 seconds'),
-			Effect.catchCause(() =>
-				Effect.fail(
-					new HttpError(
-						409,
-						'Paid outcome uncertain. No request was repeated. Retry the same request to apply a saved result, or confirm recovery.',
-					),
-				),
+			Effect.catchCause((cause) =>
+				Effect.gen(function* () {
+					const error = Cause.squash(cause);
+					if (
+						Schema.is(ClassificationDeferred)(error) ||
+						(Schema.is(ClassificationRequestError)(error) &&
+							error.status === 429)
+					) {
+						// A pre-send deferral or explicit 429 rejection has no uncertain paid result.
+						yield* store.discardRejectedRequest(requestId, operationId);
+						return yield* error;
+					}
+					const detail = Schema.is(
+						Schema.Union([
+							ClassificationRequestError,
+							ClassificationResponseError,
+							ClassificationTimeoutError,
+						]),
+					)(error)
+						? error.message
+						: error instanceof HttpError
+							? error.message
+							: 'Classification or result persistence failed.';
+					yield* Effect.logError('Classification game failed', {
+						jobId: input.jobId,
+						index: input.index,
+						appid: input.appid,
+						name: selected.game.name,
+						stage,
+						...(Schema.is(ClassificationRequestError)(error)
+							? { status: error.status, requestId: error.requestId }
+							: {}),
+						detail,
+					});
+					return yield* Effect.fail(
+						new HttpError(
+							409,
+							`${selected.game.name} (appid ${input.appid}, ${stage}): ${detail} Paid outcome uncertain. No request was repeated. Retry the same request to apply a saved result, or confirm recovery.`,
+						),
+					);
+				}),
 			),
 			Effect.ensuring(
 				store.releaseRequest(requestId, operationId).pipe(Effect.orDie),

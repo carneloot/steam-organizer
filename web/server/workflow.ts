@@ -1,6 +1,6 @@
 import { WorkerEnvironment } from 'alchemy/Cloudflare/Workers';
-import { Workflow, task } from 'alchemy/Cloudflare/Workflows';
-import { Cause, Effect, Exit } from 'effect';
+import { Workflow, sleep, task } from 'alchemy/Cloudflare/Workflows';
+import { Cause, Effect, Exit, Schema } from 'effect';
 
 import { classifyOne } from './business.js';
 import { HttpError } from './security.js';
@@ -53,29 +53,84 @@ export const runClassification = Effect.fn('Classification.runBatch')(
 				snapshot.ids.slice(index, index + concurrency),
 				(appid, offset) => {
 					const gameIndex = index + offset;
-					return task(
-						`game-${gameIndex}-${appid}`,
-						Effect.gen(function* () {
-							if (!(yield* operations.shouldClassify(id, gameIndex))) return;
-							yield* operations.classify({
+					return Effect.gen(function* () {
+						let rejections = 0;
+						for (let attempt = 0; ; attempt++) {
+							const result = yield* task(
+								`game-${gameIndex}-${appid}${attempt === 0 ? '' : `-attempt-${attempt}`}`,
+								Effect.gen(function* () {
+									if (!(yield* operations.shouldClassify(id, gameIndex)))
+										return null;
+									return yield* operations
+										.classify({
+											jobId: id,
+											index: gameIndex,
+											appid,
+											criteria: snapshot.criteria,
+										})
+										.pipe(
+											Effect.as(null),
+											Effect.catchTags({
+												ClassificationDeferred: (error) =>
+													Effect.succeed({
+														delay: error.retryAfterMs,
+														rejected: false,
+														message: error.message,
+													}),
+												ClassificationRequestError: (error) =>
+													error.status === 429
+														? Effect.succeed({
+																delay: error.retryAfterMs ?? 60_000,
+																rejected: true,
+																message: `${error.message}${error.requestId ? ` Request ID: ${error.requestId}.` : ''}`,
+															})
+														: Effect.fail(error),
+											}),
+										);
+								}),
+								options,
+							);
+							if (!result) return;
+							if (result.rejected && rejections++ >= 3)
+								return yield* Effect.fail(
+									new HttpError(
+										429,
+										`${result.message} Rate limit retries exhausted after 4 attempts. Try this game in a later job.`,
+									),
+								);
+							const delay = Math.max(1_000, result.delay);
+							yield* Effect.logWarning('Classification workflow waiting', {
 								jobId: id,
-								index: gameIndex,
 								appid,
-								criteria: snapshot.criteria,
+								index: gameIndex,
+								attempt,
+								rejections,
+								delayMs: delay,
+								reason: result.message,
 							});
-						}),
-						options,
-					).pipe(
+							yield* sleep(`wait-${gameIndex}-${appid}-${attempt}`, delay);
+						}
+					}).pipe(
 						Effect.catchCause((cause) => {
 							const error = Cause.squash(cause);
+							// Cached task failures restore fields, not Error prototypes.
+							const message = Schema.is(
+								Schema.Struct({
+									status: Schema.Finite,
+									message: Schema.String,
+								}),
+							)(error)
+								? error.message
+								: 'Classification failed. Try this game in a later job.';
 							return task(
 								`error-${gameIndex}-${appid}`,
-								operations.saveGameError(
-									id,
+								Effect.logError('Classification workflow game failed', {
+									jobId: id,
 									appid,
-									error instanceof HttpError
-										? error.message
-										: 'Classification failed. Try this game in a later job.',
+									index: gameIndex,
+									message,
+								}).pipe(
+									Effect.andThen(operations.saveGameError(id, appid, message)),
 								),
 								options,
 							);

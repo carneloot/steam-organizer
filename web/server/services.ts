@@ -2,7 +2,7 @@ import { BrowserCrypto } from '@effect/platform-browser';
 import { Layer, Redacted } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 
-import { JevLayer } from '../../src/layers/jev.js';
+import { JevWorkflowLayer } from '../../src/layers/jev.js';
 import { LibraryLayer } from '../../src/layers/library.js';
 import { SteamLayer } from '../../src/layers/steam.js';
 import { AppConfig } from '../../src/services/app-config.js';
@@ -39,7 +39,7 @@ export function services(env: Env) {
 	return Layer.mergeAll(
 		BrowserCrypto.layer,
 		SteamLayer.pipe(Layer.provide(dependencies)),
-		JevLayer.pipe(Layer.provide(dependencies)),
+		JevWorkflowLayer.pipe(Layer.provide(dependencies)),
 		LibraryLayer,
 	);
 }

@@ -5,6 +5,7 @@ import {
 	Effect,
 	Fiber,
 	Layer,
+	Predicate,
 	Queue,
 	Redacted,
 } from 'effect';
@@ -15,24 +16,26 @@ import { TestClock } from 'effect/testing';
 import { AppConfig } from '../services/app-config.js';
 import { Classifier } from '../services/classifier.js';
 import { Steam } from '../services/steam.js';
-import { JevLayer } from './jev.js';
+import { JevLayer, JevWorkflowLayer } from './jev.js';
 import { LibraryLayer } from './library.js';
 import { SteamLayer } from './steam.js';
 
 const limiterLayer = RateLimiter.layer.pipe(
 	Layer.provide(RateLimiter.layerStoreMemory),
 );
-const apiLayer = Layer.mergeAll(SteamLayer, JevLayer).pipe(
-	Layer.provide(LibraryLayer),
-	Layer.provide(
-		Layer.succeed(AppConfig, {
-			steamApiKey: Redacted.make('steam-test-key'),
-			jevApiKey: Redacted.make('jev-test-key'),
-		}),
-	),
-);
+const apiLayer = (durablePacing: boolean) =>
+	Layer.mergeAll(SteamLayer, durablePacing ? JevWorkflowLayer : JevLayer).pipe(
+		Layer.provide(LibraryLayer),
+		Layer.provide(
+			Layer.succeed(AppConfig, {
+				steamApiKey: Redacted.make('steam-test-key'),
+				jevApiKey: Redacted.make('jev-test-key'),
+			}),
+		),
+	);
 const makeApis = Effect.fn('Test.makeApis')(function* (
 	transport: HttpClient.HttpClient,
+	durablePacing = false,
 ) {
 	return yield* Effect.gen(function* () {
 		const steam = yield* Steam;
@@ -48,7 +51,7 @@ const makeApis = Effect.fn('Test.makeApis')(function* (
 				.pipe(Effect.asVoid),
 		};
 	}).pipe(
-		Effect.provide(apiLayer),
+		Effect.provide(apiLayer(durablePacing)),
 		Effect.provideService(HttpClient.HttpClient, transport),
 	);
 });
@@ -227,6 +230,54 @@ describe('API HTTP rate limiting', () => {
 				assert.isUndefined(waiting.pollUnsafe());
 				yield* TestClock.adjust(1);
 				yield* Fiber.join(waiting);
+				assert.strictEqual(calls, 2);
+			}).pipe(Effect.provide(limiterLayer)),
+	);
+
+	it.effect(
+		'defers web requests immediately through a cooldown longer than the HTTP timeout',
+		() =>
+			Effect.gen(function* () {
+				let calls = 0;
+				const apis = yield* makeApis(
+					HttpClient.make((request) =>
+						Effect.sync(() => {
+							calls++;
+							return HttpClientResponse.fromWeb(
+								request,
+								Response.json(bodies['api.typesafe.ai'], {
+									status: calls === 1 ? 429 : 200,
+									headers: {
+										'Retry-After': '75',
+										'x-request-id': 'long-cooldown',
+									},
+								}),
+							);
+						}),
+					),
+					true,
+				);
+				const rejected = yield* apis.jev.pipe(Effect.flip);
+				assert.strictEqual(rejected._tag, 'ClassificationRequestError');
+				if (Predicate.isTagged(rejected, 'ClassificationRequestError')) {
+					assert.strictEqual(rejected.status, 429);
+					assert.strictEqual(rejected.retryAfterMs, 75_000);
+					assert.strictEqual(rejected.requestId, 'long-cooldown');
+				}
+				const deferred = yield* apis.jev.pipe(Effect.flip);
+				assert.strictEqual(deferred._tag, 'ClassificationDeferred');
+				if (Predicate.isTagged(deferred, 'ClassificationDeferred'))
+					assert.strictEqual(deferred.retryAfterMs, 75_000);
+				assert.strictEqual(calls, 1);
+				yield* TestClock.adjust(74_999);
+				const stillDeferred = yield* apis.jev.pipe(Effect.flip);
+				assert.strictEqual(stillDeferred._tag, 'ClassificationDeferred');
+				assert.strictEqual(calls, 1);
+				yield* TestClock.adjust(1);
+				yield* apis.jev;
+				assert.strictEqual(calls, 2);
+				const paced = yield* apis.jev.pipe(Effect.flip);
+				assert.strictEqual(paced._tag, 'ClassificationDeferred');
 				assert.strictEqual(calls, 2);
 			}).pipe(Effect.provide(limiterLayer)),
 	);
